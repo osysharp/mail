@@ -1,0 +1,21 @@
+// Osysharp.Mail.Gmail — a Google Workspace or Gmail inbox as an `Osysharp.Mail` mailbox: the app watches it for new
+// mail and sends from it, threaded, through the Gmail API.
+//
+// ⚑ YOUR OWN GOOGLE CREDENTIALS (BYOK). The app brings an OAuth client of its own (a client id and secret from its
+//   Google Cloud project) and a REFRESH TOKEN for the mailbox, granted once by whoever owns it, with the scopes
+//   `gmail.readonly` and `gmail.send`. Both secrets are the app's: this package never learns their names, and it reaches
+//   no host but Google's token endpoint and the Gmail API.
+//
+// ⭐ The token exchange sends the client secret and the refresh token in a FORM BODY, which is how Google's token endpoint
+//    takes them — so this package says so, and the app's grant of the host is its acceptance (D-SECRETSINK1).
+package Osysharp.Mail.Gmail {
+  version     "0.2.0";
+  minPlatform "0.9.0";
+  summary     "a Gmail / Google Workspace inbox as a mailbox for Osysharp.Mail — new mail pushed through Cloud Pub/Sub (polled without), replies sent from it, threaded.";
+  model "model/*.osy";
+  use Osysharp.Mail@0;
+  use Osysharp.Http;
+  egress "oauth2.googleapis.com" { secretIn body "client_secret"; secretIn body "refresh_token"; }
+  egress "gmail.googleapis.com";
+  tests "tests";
+}

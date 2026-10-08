@@ -1,0 +1,15 @@
+// The producer's test project for Osysharp.Mail.Gmail — a watched inbox and replies sent from it, asserted on what
+// reached Google's API and what the app kept. Every test stubs `Http.*`, so nothing leaves the process; the stubs answer
+// as Google's documented endpoints do.
+app MailGmailKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Mail@0;
+  use Osysharp.Mail.Receiving@0;
+  use Osysharp.Mail.Gmail@0 { egress "oauth2.googleapis.com"; egress "gmail.googleapis.com"; }
+  use Osysharp.Workflow;
+  use Osysharp.Storage;
+  use Osysharp.Http;
+}
+

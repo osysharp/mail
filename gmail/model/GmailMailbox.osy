@@ -1,0 +1,259 @@
+namespace Osysharp.Mail.Gmail;
+
+using Osysharp.Http;
+using Osysharp.Mail;
+
+/// A Gmail / Google Workspace inbox, watched and sent from:
+///
+///   app.Mail = new MailSetup {
+///     Mailboxes = [new GmailMailbox {
+///       Address      = "support@acme.com",
+///       ClientId     = "1234-abc.apps.googleusercontent.com",
+///       ClientSecret = Security.IsSecretSet("GoogleClientSecret") ? Secret.GoogleClientSecret : "",
+///       RefreshToken = Security.IsSecretSet("SupportMailboxToken") ? Secret.SupportMailboxToken : "",
+///     }],
+///   };
+///
+/// NEW MAIL is read through the mailbox's HISTORY: a cursor is a Gmail history id, and each poll asks for the messages
+/// ADDED to the inbox since it — so nothing is fetched twice and nothing already read is imported. Each message is
+/// fetched whole (`format=raw`) and handed over as it arrived. A history id Google no longer keeps (a mailbox not polled
+/// for about a week) restarts from now and says so on the watch.
+///
+/// SENDING goes through `users/me/messages/send` as the RFC 5322 message the outbox built — its Message-ID, In-Reply-To
+/// and References as they are — so the customer's client threads it, and it sits in the mailbox's Sent folder.
+///
+/// PUSH (0.2.0, D-PUSHMAIL1): with a `PushTopic` and the `PushServiceAccount` its push subscription signs with, the inbox
+/// is WATCHED (`users.watch`) — Gmail publishes each change to the Cloud Pub/Sub topic, Pub/Sub pushes it to the app's
+/// push door with a Google-signed OpenID Connect token, and the platform verifies that token before this mailbox reads
+/// the message. A push names the mailbox and nothing else; the fetch it wakes reads the history, as a poll does. The
+/// watch lasts seven days and is renewed before then by `Osysharp.Mail.Receiving`; a half-hourly poll catches anything
+/// Pub/Sub dropped.
+public class GmailMailbox : IMailbox {
+  public string Key { get; } = "gmail";
+  /// The mailbox's address — the inbox the refresh token was granted for, or an alias it may send as.
+  public string Address { get; set; } = "";
+  /// The OAuth client's id, from the app's Google Cloud project.
+  public string ClientId = "";
+  /// The OAuth client's secret — `Secret.X`, or empty while there is none.
+  public string ClientSecret = "";
+  /// The mailbox owner's refresh token, granted once with `gmail.readonly` and `gmail.send` — `Secret.X`, or empty.
+  public string RefreshToken = "";
+  /// CONNECT FROM A PAGE (D-PUSHMAIL1): the app's OAuth client (`app.OAuthClients`, `OAuthCapability.Connection`, the
+  /// same client id and secret as above) an admin consents with, and the app secret its refresh token is kept in —
+  /// the one `RefreshToken` reads (`Security.IsSecretSet("X") ? Secret.X : ""`). Empty: the token is set by hand.
+  public string ConnectWith = "";
+  public string TokenSecret = "";
+  /// The Gmail API root, unless a gateway that speaks the same wire stands in front of it.
+  public string ApiUrl = "https://gmail.googleapis.com/gmail/v1/users/me";
+  /// Google's token endpoint.
+  public string TokenUrl = "https://oauth2.googleapis.com/token";
+  /// The Cloud Pub/Sub topic Gmail publishes this inbox's changes to — `projects/<project>/topics/<topic>`, with
+  /// `gmail-api-push@system.gserviceaccount.com` granted Publisher on it. Empty: the inbox is polled.
+  public string PushTopic = "";
+  /// The service account the topic's PUSH subscription signs its requests with (its OIDC token's `email`). A push signed
+  /// by anyone else is refused.
+  public string PushServiceAccount = "";
+  /// The audience the push subscription puts in its token. Empty: the push endpoint's own URL, which is Pub/Sub's
+  /// default when a subscription names none.
+  public string PushAudience = "";
+
+  public bool IsReady() { return Address != "" && ClientId != "" && ClientSecret != "" && RefreshToken != ""; }
+
+  /// Which setting is missing — the sentence on the watch and on held mail.
+  public string NotReadyReason() {
+    if (Address == "") { return "This Gmail mailbox has no Address."; }
+    if (ClientId == "" || ClientSecret == "") {
+      return $"The Gmail mailbox '{Address}' has no OAuth client yet — set ClientId and ClientSecret from your Google Cloud project.";
+    }
+    return $"The Gmail mailbox '{Address}' has no refresh token yet — grant it once (gmail.readonly and gmail.send) and set RefreshToken.";
+  }
+
+  public MailboxPage Fetch(string cursor, int max) {
+    var headers = Bearer();
+    if (cursor == "") {
+      // START NOW: where the mailbox's history stands, and nothing from before it.
+      return new MailboxPage { Cursor = JsonSerializer.Deserialize<GmailProfile>(BodyOf(Http.Get(ApiUrl + "/profile", headers), "read the mailbox")).HistoryId };
+    }
+    var listed = Http.Get(ApiUrl + "/history?historyTypes=messageAdded&labelId=INBOX&startHistoryId="
+      + Uri.EscapeDataString(cursor), headers);
+    if (listed.StatusCode == 404) {
+      // Google keeps about a week of history. Older than that, there is no "since": start from now, and say so.
+      return new MailboxPage {
+        Cursor = JsonSerializer.Deserialize<GmailProfile>(BodyOf(Http.Get(ApiUrl + "/profile", headers), "read the mailbox")).HistoryId,
+        Notice = $"Gmail no longer kept the mailbox's history from {cursor} — mail that arrived in '{Address}' while it "
+          + "was not being read was not taken in. Watching resumed from now.",
+      };
+    }
+    var page = JsonSerializer.Deserialize<GmailHistoryPage>(BodyOf(listed, "list new mail"));
+    var result = new MailboxPage { Cursor = cursor };
+    foreach (var record in page.History) {
+      foreach (var added in record.MessagesAdded) {
+        if (result.Items.Count >= max) { return result; }   // the cursor stays at the last record fully taken
+        var labels = added.Message.LabelIds;
+        if (labels.Contains("SENT") || labels.Contains("DRAFT") || !labels.Contains("INBOX")) { continue; }
+        var raw = JsonSerializer.Deserialize<GmailRaw>(BodyOf(Http.Get(ApiUrl + "/messages/" + added.Message.Id + "?format=raw", headers), "fetch a message"));
+        result.Items.Add(new MailboxItem { ProviderId = added.Message.Id, Raw = FromBase64Url(raw.Raw) });
+      }
+      result.Cursor = record.Id;
+    }
+    // Everything listed was taken: the mailbox's own history id is where the next poll starts.
+    if (page.NextPageToken == "" && page.HistoryId != "") { result.Cursor = page.HistoryId; }
+    return result;
+  }
+
+  public bool CanPush() { return PushTopic != "" && PushServiceAccount != ""; }
+
+  public MailboxConnection Connection() {
+    return new MailboxConnection { Client = ConnectWith, Secret = TokenSecret, Connected = RefreshToken != "" };
+  }
+
+  /// `users.watch`: Gmail publishes every change to the INBOX to `PushTopic` until the watch expires (seven days).
+  public MailboxSubscription Subscribe(string notifyUrl, string secret) {
+    var request = JsonSerializer.Serialize(new GmailWatchRequest { TopicName = PushTopic, LabelIds = ["INBOX"] });
+    var watched = JsonSerializer.Deserialize<GmailWatch>(BodyOf(
+      Http.Post(ApiUrl + "/watch", request, "application/json", Bearer()), "watch the inbox (users.watch)"));
+    return new MailboxSubscription { Id = Address, ExpiresAt = DateTimeOffset.FromUnixTimeMilliseconds(long.Parse(watched.Expiration)).UtcDateTime };
+  }
+
+  /// `users.stop`: no more pushes for this inbox.
+  public void Unsubscribe(MailboxSubscription current) {
+    BodyOf(Http.Post(ApiUrl + "/stop", "", "application/json", Bearer()), "stop watching the inbox (users.stop)");
+  }
+
+  /// A Pub/Sub push: `{"message": {"data": base64({"emailAddress", "historyId"}), …}, "subscription": …}`. Read only when
+  /// it names THIS inbox and its token — verified by the platform — was issued to `PushServiceAccount` for this
+  /// endpoint. A forged or misaddressed push throws, and the app's door refuses it.
+  public List<MailboxNotice> ReadPush(string body, string notifyUrl) {
+    var push = JsonSerializer.Deserialize<PubSubPush>(body);
+    if (push.Message.Data == "") { return []; }
+    var change = JsonSerializer.Deserialize<GmailPushData>(Encoding.UTF8.GetString(Convert.FromBase64String(push.Message.Data)));
+    if (change.EmailAddress.Trim().ToLower() != Address.Trim().ToLower()) { return []; }
+    var audience = PushAudience != "" ? PushAudience : notifyUrl;
+    var sender = PushSenderOf(audience) ?? "";
+    if (sender.Trim().ToLower() != PushServiceAccount.Trim().ToLower()) {
+      Log.Warning("Gmail push for {Address} refused: its token was not issued to {ServiceAccount} for {Audience}",
+        Address, PushServiceAccount, audience);
+      throw new ValidationException("This push is not signed by the mailbox's Pub/Sub service account.");
+    }
+    return [new MailboxNotice { Address = change.EmailAddress }];
+  }
+
+  public string SendMail(MailMessage message, string idempotencyKey) {
+    var body = JsonSerializer.Serialize(new GmailRaw { Raw = ToBase64Url(RawOf(message)) });
+    var sent = Http.Post(ApiUrl + "/messages/send", body, "application/json", Bearer());
+    return JsonSerializer.Deserialize<GmailSent>(BodyOf(sent, "send the message")).Id;
+  }
+
+  /// A fresh access token for this mailbox, from its refresh token. Asked per poll — an access token lives an hour and a
+  /// poll is a minute apart, so keeping one would be a cache to invalidate for a request Google answers in milliseconds.
+  Dictionary<string, string> Bearer() {
+    var form = "grant_type=refresh_token&client_id=" + Uri.EscapeDataString(ClientId)
+      + "&client_secret=" + Uri.EscapeDataString(ClientSecret)
+      + "&refresh_token=" + Uri.EscapeDataString(RefreshToken);
+    var answered = Http.Post(TokenUrl, form, "application/x-www-form-urlencoded", new Dictionary<string, string>());
+    if (!answered.IsSuccess) {
+      throw new ExternalServiceException(answered.StatusCode == 400 || answered.StatusCode == 401
+        ? $"Google refused the credentials for '{Address}' ({answered.StatusCode}) — the refresh token was revoked or the client secret changed. Grant the mailbox again."
+        : $"Google's token endpoint answered {answered.StatusCode} for '{Address}'.");
+    }
+    var headers = new Dictionary<string, string>();
+    headers.Add("Authorization", "Bearer " + JsonSerializer.Deserialize<GmailToken>(answered.Body).AccessToken);
+    return headers;
+  }
+
+  /// The body of a successful answer; anything else is the provider failing, said with what was being done.
+  string BodyOf(HttpResponse r, string doing) {
+    if (!r.IsSuccess) {
+      throw new ExternalServiceException($"Gmail could not {doing} for '{Address}': it answered {r.StatusCode}.");
+    }
+    return r.Body;
+  }
+}
+
+/// Who signed the push this request carries, for `audience` — the verified email of its OpenID Connect token (the
+/// PLATFORM verified it against Google's keys before this ran; the token itself never reaches the app), or null.
+/// A function of its own so a test can stand in for Google: `PushSenderOf.Stub(a => "push@….gserviceaccount.com")`.
+public string? PushSenderOf(string audience) {
+  return Request.OidcEmail(audience);
+}
+
+/// base64url (RFC 4648 §5, what Gmail uses) → bytes.
+public byte[] FromBase64Url(string text) {
+  var b64 = text.Replace("-", "+").Replace("_", "/");
+  while (b64.Length % 4 != 0) { b64 = b64 + "="; }
+  return Convert.FromBase64String(b64);
+}
+
+/// bytes → base64url, unpadded.
+public string ToBase64Url(byte[] bytes) {
+  return Convert.ToBase64String(bytes).Replace("+", "-").Replace("/", "_").Replace("=", "");
+}
+
+// ── the wire ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+public class GmailToken {
+  [ExternalName("access_token")] public string AccessToken = "";
+}
+
+public class GmailProfile {
+  public string EmailAddress = "";
+  public string HistoryId = "";
+}
+
+public class GmailHistoryPage {
+  public List<GmailHistory> History = [];
+  public string HistoryId = "";
+  public string NextPageToken = "";
+}
+
+public class GmailHistory {
+  public string Id = "";
+  public List<GmailAdded> MessagesAdded = [];
+}
+
+public class GmailAdded {
+  public GmailMessageRef Message = new GmailMessageRef();
+}
+
+public class GmailMessageRef {
+  public string Id = "";
+  public List<string> LabelIds = [];
+}
+
+public class GmailRaw {
+  public string Raw = "";
+}
+
+public class GmailSent {
+  public string Id = "";
+}
+
+public class GmailWatchRequest {
+  [ExternalName("topicName")] public string TopicName = "";
+  [ExternalName("labelIds")] public List<string> LabelIds = [];
+}
+
+public class GmailWatch {
+  public string HistoryId = "";
+  /// Milliseconds since the epoch, as a string — Gmail's spelling.
+  public string Expiration = "0";
+}
+
+/// What Cloud Pub/Sub POSTs to a push endpoint.
+public class PubSubPush {
+  public PubSubMessage Message = new PubSubMessage();
+  public string Subscription = "";
+}
+
+public class PubSubMessage {
+  /// base64 of the published payload.
+  public string Data = "";
+  public string MessageId = "";
+}
+
+/// What Gmail publishes for a change.
+public class GmailPushData {
+  public string EmailAddress = "";
+  /// A NUMBER on this wire (unlike the API's own string history ids).
+  public long HistoryId = 0;
+}

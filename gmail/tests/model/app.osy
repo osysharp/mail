@@ -1,0 +1,114 @@
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Mail.Gmail;
+
+[Role] enum AppRole { Authenticator, Agent }
+
+policy IsAgent => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Agent);
+// Who manages the mailboxes (Osysharp.Mail.Receiving's page) — this app has no admins, so its agent staff.
+policy ManagesMailboxes => IsAgent;
+
+entity Person : Principal {
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+    allow update when IsAuthenticated || IsAuthenticator where Id == user.Id;
+    allow update when IsAuthenticator;
+  }
+}
+
+partial entity OutgoingMail { security { allow create, read when IsAgent; } }
+partial entity OutgoingMailFile { security { allow create, read when IsAgent; } }
+partial entity MailboxWatch { security { allow create, read when IsAgent; } }
+partial entity ReceivedMail { security { allow read when IsAgent; } }
+
+/// In a real app the two secrets are `Secret.X`; literals here, because every test stubs Google.
+app.Mail = new MailSetup {
+  Mailboxes = [
+    // Polled: no push topic.
+    new GmailMailbox { Address = "support@acme.test", ClientId = "client-1", ClientSecret = "client-secret",
+                       RefreshToken = "refresh-1" },
+    // Pushed: Gmail publishes its changes to a Pub/Sub topic, whose push subscription signs as this service account.
+    new GmailMailbox { Address = "push@acme.test", ClientId = "client-1", ClientSecret = "client-secret",
+                       RefreshToken = "refresh-1", PushTopic = "projects/acme/topics/mail",
+                       PushServiceAccount = "mail-push@acme.iam.gserviceaccount.com" },
+  ],
+  Receiver = new Recorder(),
+  From = "Acme Support <support@acme.test>",
+  PushPath = "/api/rest/v1/mail-push",
+};
+
+// The app's push door, where `PushPath` says.
+app.Apis = [
+  new RestApi("MailPush") {
+    Route = "mail-push",
+    Auth  = new ApiAuth { Anonymous = true },
+    Endpoints = [
+      new Endpoint(MailboxPushed) {
+        Method = HttpMethod.Post, Path = "/{provider}", Raw = true,
+        Query = ["validationToken"], ContentType = "text/plain", OidcIssuer = "https://accounts.google.com",
+      },
+    ],
+  },
+];
+
+/// What the stubs say Google is doing right now.
+entity Google {
+  /// The inbox's current history id, as `profile` answers it.
+  int HistoryId = 1000;
+  /// `history` answers 404 — the start id is older than Google keeps.
+  bool HistoryGone = false;
+  /// The token endpoint refuses the refresh token.
+  bool Refuses = false;
+  security { allow read, create, update when IsAuthenticated || IsAuthenticator || IsAnonymous; }
+}
+
+/// A message in the stubbed inbox, by Gmail id.
+entity GmailMessage {
+  [Required, MaxLength(40)] string GmailId;
+  [Required] int HistoryRecord;
+  [MaxLength(60)] string Labels = "INBOX";
+  [Required] string Raw;
+  security { allow read, create when IsAuthenticated || IsAuthenticator || IsAnonymous; }
+}
+
+/// Every request a stub answered.
+entity WireLog {
+  [Required, MaxLength(10)] string Verb;
+  [Required, MaxLength(500)] string Url;
+  string Body = "";
+  security { allow read, create when IsAuthenticated || IsAuthenticator || IsAnonymous; }
+}
+
+entity Handled {
+  [Required, MaxLength(300)] string Subject;
+  [MaxLength(300)] string MessageId = "";
+  security { allow read when IsAuthenticated; }
+}
+
+public class Recorder : IMailReceiver {
+  public void Received(MailMessage mail, MailReceipt receipt) {
+    new Handled { Subject = mail.Subject, MessageId = mail.MessageId };
+  }
+}
+
+/// The history page `history?startHistoryId=…` answers: every message added after the start id, one record each.
+string HistoryJson(string start) {
+  var from = int.Parse(start);
+  var records = GmailMessage.Where(m => m.HistoryRecord > from).OrderBy(m => m.HistoryRecord).ToList();
+  var parts = records.Select(m => "{\"id\":\"" + m.HistoryRecord.ToString() + "\",\"messagesAdded\":[{\"message\":{\"id\":\""
+    + m.GmailId + "\",\"labelIds\":[\"" + m.Labels.Replace(",", "\",\"") + "\"]}}]}").ToList();
+  return "{\"history\":[" + string.Join(",", parts) + "],\"historyId\":\"" + Google.Single().HistoryId.ToString() + "\"}";
+}
+
+/// base64url of a message's text — the `raw` Gmail answers.
+string RawJson(GmailMessage m) {
+  return "{\"id\":\"" + m.GmailId + "\",\"raw\":\"" + ToBase64Url(Encoding.UTF8.GetBytes(m.Raw)) + "\"}";
+}
+
+/// A message arrives in the stubbed inbox, and the mailbox's history moves on.
+void Arrive(string gmailId, int record, string raw, string labels = "INBOX") {
+  new GmailMessage { GmailId = gmailId, HistoryRecord = record, Raw = raw, Labels = labels };
+  Google.Single().HistoryId = record;
+}
