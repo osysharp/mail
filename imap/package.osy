@@ -1,0 +1,18 @@
+// Osysharp.Mail.Imap — any IMAP mailbox as an `Osysharp.Mail` mailbox: the app watches it for new mail over IMAP and
+// replies from it over SMTP submission. The fallback for a provider with no API of its own (Fastmail, a hosting
+// company's mail, a self-hosted server) — Gmail and Microsoft 365 have first-class packages that need no app password.
+//
+// ⚑ THE APP NAMES THE SERVERS, so this package reaches only what the app grants it:
+//     use Osysharp.Mail.Imap@0 { egress "imap.fastmail.com"; egress "smtp.fastmail.com"; }
+//   and every connection is TLS (993/465 from the first byte, STARTTLS on any other port — never in the clear) to an
+//   address the platform's guard has checked is on the internet.
+package Osysharp.Mail.Imap {
+  version     "0.2.0";
+  minPlatform "0.9.0";
+  summary     "any IMAP mailbox as a mailbox for Osysharp.Mail — new mail read over IMAP, replies sent over SMTP, threaded.";
+  model "model/*.osy";
+  use Osysharp.Mail@0;
+  use Osysharp.Http;
+  egress consumer;
+  tests "tests";
+}

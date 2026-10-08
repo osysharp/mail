@@ -1,0 +1,86 @@
+namespace Osysharp.Mail.Imap;
+
+using Osysharp.Mail;
+
+/// Any IMAP mailbox, watched over IMAP and sent from over SMTP submission:
+///
+///   app.Mail = new MailSetup {
+///     Mailboxes = [new ImapMailbox {
+///       Address  = "support@acme.com",
+///       ImapHost = "imap.fastmail.com",
+///       SmtpHost = "smtp.fastmail.com",
+///       Password = Security.IsSecretSet("SupportMailboxPassword") ? Secret.SupportMailboxPassword : "",
+///     }],
+///   };
+///
+/// The password is an APP PASSWORD the provider issues for exactly this — never the account's own sign-in password.
+/// NEW MAIL is read by UID: the cursor is the folder's UIDVALIDITY and the last UID taken, so nothing is read twice, and
+/// nothing already in the folder is imported when it is first watched. Messages are read with `BODY.PEEK[]` — nobody
+/// working in the mailbox sees them turn "read". A folder re-created on the server restarts from now, and says so.
+///
+/// SENDING goes over SMTP submission as the RFC 5322 message the outbox built, so its Message-ID, In-Reply-To and
+/// References are the conversation's. Most providers file a submitted message in Sent by themselves; one that does not
+/// leaves it out of Sent, which is the one difference from the API mailboxes.
+public class ImapMailbox : IMailbox {
+  public string Key { get; } = "imap";
+  /// The mailbox's address.
+  public string Address { get; set; } = "";
+  /// The IMAP server, and its port (993 is TLS; any other is upgraded with STARTTLS).
+  public string ImapHost = "";
+  public int ImapPort = 993;
+  /// The SMTP submission server, and its port (587 STARTTLS, or 465 TLS).
+  public string SmtpHost = "";
+  public int SmtpPort = 587;
+  /// The login, when it is not the address itself.
+  public string Username = "";
+  /// The app password — `Secret.X`, or empty while there is none.
+  public string Password = "";
+  /// The folder new mail arrives in.
+  public string Folder = "INBOX";
+  /// How often to ask the server for new mail. The plan's minimum interval raises a shorter one at run time.
+  public TimeSpan PollInterval = TimeSpan.FromMinutes(5);
+
+  public bool IsReady() { return Address != "" && ImapHost != "" && SmtpHost != "" && Password != ""; }
+
+  public string NotReadyReason() {
+    if (Address == "") { return "This IMAP mailbox has no Address."; }
+    if (ImapHost == "" || SmtpHost == "") {
+      return $"The IMAP mailbox '{Address}' needs both servers — set ImapHost (for reading) and SmtpHost (for replying).";
+    }
+    return $"The IMAP mailbox '{Address}' has no app password yet — create one with the mail provider and set Password.";
+  }
+
+  public MailboxPage Fetch(string cursor, int max) {
+    var answer = JsonSerializer.Deserialize<ImapPage>(Imap.Fetch(ImapHost, ImapPort, Login(), Password, false, Folder, cursor, max));
+    var page = new MailboxPage { Cursor = answer.Cursor, Notice = answer.Notice };
+    foreach (var m in answer.Messages) {
+      page.Items.Add(new MailboxItem { ProviderId = m.Uid, Raw = Convert.FromBase64String(m.Raw) });
+    }
+    return page;
+  }
+
+  public string SendMail(MailMessage message, string idempotencyKey) {
+    Smtp.Send(SmtpHost, SmtpPort, Login(), Password, false, RawOf(message));
+    // SMTP answers no id of its own that anything can look a message up by; the Message-ID is the message's identity.
+    return message.MessageId;
+  }
+
+  /// IMAP is POLLED (D-PUSHMAIL1): IDLE would hold a connection open per mailbox for as long as it is watched, which
+  /// costs more than it saves. Asked every five minutes by default — and no more often than the app's plan allows.
+  public TimeSpan PollEvery() { return PollInterval; }
+
+  string Login() { return Username != "" ? Username : Address; }
+}
+
+/// What `Imap.Fetch` answers.
+public class ImapPage {
+  public string Cursor = "";
+  public string Notice = "";
+  public List<ImapRawMessage> Messages = [];
+}
+
+public class ImapRawMessage {
+  public string Uid = "";
+  /// The whole message, base64.
+  public string Raw = "";
+}

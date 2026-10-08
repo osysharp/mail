@@ -1,0 +1,87 @@
+// Osysharp.Mail.Imap — `Imap.Fetch` / `Smtp.Send` stubbed as the platform's transport answers them, and every test
+// asserts what the app KEPT or what the server was handed.
+
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Mail.Imap;
+
+[TestFixture]
+void Inbox() {
+  var ada = new Person { Email = "ada@acme.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  Imap.Fetch.Stub((host, port, username, credential, oauth, folder, cursor, max) => {
+    new WireLog { Verb = "IMAP", Host = host, Port = port, Login = username, Cursor = cursor };
+    if (cursor == "") { return "{\"Cursor\":\"42:6\",\"Notice\":\"\",\"Messages\":[]}"; }
+    var raw = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+      "From: Cus <cus@example.test>\nTo: support@acme.test\nSubject: Laptop will not boot\nMessage-ID: <seven@example.test>\n\nHelp.\n"));
+    return "{\"Cursor\":\"42:7\",\"Notice\":\"\",\"Messages\":[{\"Uid\":\"7\",\"Raw\":\"" + raw + "\"}]}";
+  });
+  Smtp.Send.Stub((host, port, username, credential, oauth, message) => {
+    new WireLog { Verb = "SMTP", Host = host, Port = port, Login = username, Message = Encoding.UTF8.GetString(message) };
+    return "250 2.0.0 OK queued";
+  });
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@acme.test");
+
+[Test(Inbox)]
+void a_watched_imap_mailbox_starts_at_its_newest_uid_and_keeps_what_arrives_after() {
+  runas (Ada) {
+    var w = WatchMailbox("support@acme.test");
+    UnitOfWork.Commit();
+    Workflow.Settle(w);
+  }
+  runas (Ada) {
+    Assert.Equal("42:6", MailboxWatch.Single().Cursor);
+    // IMAP is polled on its own, slower interval (five minutes by default): a minute on, it has not asked again.
+    TestClock.Advance(TimeSpan.FromMinutes(1));
+    Workflow.Settle(MailboxWatch.Single());
+    Assert.False(WireLog.Any(w => w.Verb == "IMAP" && w.Cursor == "42:6"));
+    TestClock.Advance(TimeSpan.FromMinutes(4));
+    Workflow.Settle(MailboxWatch.Single());
+    foreach (var r in ReceivedMail.ToList()) { Workflow.Settle(r); }
+  }
+  runas (Ada) {
+    var kept = ReceivedMail.Single();
+    Assert.Equal("7", kept.ProviderId);
+    Assert.Equal("<seven@example.test>", kept.MessageId);
+    Assert.Equal(1, Handled.Count(h => h.Subject == "Laptop will not boot"));
+    Assert.Equal("42:7", MailboxWatch.Single().Cursor);
+    // It asked the right server, as the mailbox, from where the last poll left off.
+    var second = WireLog.Single(w => w.Verb == "IMAP" && w.Cursor == "42:6");
+    Assert.Equal("imap.acme.test", second.Host);
+    Assert.Equal(993, second.Port);
+    Assert.Equal("support@acme.test", second.Login);
+  }
+}
+
+[Test(Inbox)]
+void a_reply_goes_out_over_smtp_as_the_message_the_outbox_built() {
+  runas (Ada) {
+    var reply = SendMail(new MailMessage {
+      From = "Acme Support <support@acme.test>", To = ["cus@example.test"], Subject = "Re: Laptop will not boot",
+      Text = "Hold the power button.", InReplyTo = "<seven@example.test>", References = ["<seven@example.test>"],
+    });
+    UnitOfWork.Commit();
+    Workflow.Settle(reply);
+  }
+  runas (Ada) {
+    var sent = OutgoingMail.Single();
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.Equal("imap", sent.SentWith);
+    Assert.Equal(sent.MessageId, sent.ProviderId);
+    var wire = WireLog.Single(w => w.Verb == "SMTP");
+    Assert.Equal("smtp.acme.test", wire.Host);
+    Assert.Equal(587, wire.Port);
+    var mail = ParseMail(Encoding.UTF8.GetBytes(wire.Message));
+    Assert.Equal("<seven@example.test>", mail.InReplyTo);
+  }
+}
+
+[Test(Inbox)]
+void a_mailbox_with_no_smtp_server_is_not_ready_and_says_so() {
+  var box = new ImapMailbox { Address = "help@acme.test", ImapHost = "imap.acme.test", Password = "p" };
+  Assert.False(box.IsReady());
+  Assert.Contains("SmtpHost (for replying)", box.NotReadyReason());
+}
