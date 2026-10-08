@@ -1,0 +1,54 @@
+using Osysharp.Http;
+using Osysharp.Identity;
+using Osysharp.Mail;
+
+[TestFixture]
+void Desk() {
+  var ada = new Person { Email = "ada@acme.test" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  Http.Post.Stub((url, body) => {
+    new WireLog { Url = url, Body = body };
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"re-123\"}" };
+  });
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@acme.test");
+
+[Test(Desk)]
+void a_message_reaches_resend_with_its_own_message_id_and_answers_resends_id() {
+  runas (Ada) {
+    var mail = Notify("cus@example.test", "Your ticket");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  runas (Ada) {
+    var sent = OutgoingMail.Single(m => m.Subject == "Your ticket");
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.Equal("re-123", sent.ProviderId);
+    var wire = WireLog.Single(w => w.Body.Contains("Your ticket"));
+    Assert.Equal("https://api.resend.com/emails", wire.Url);
+    Assert.Contains("\"to\":[\"cus@example.test\"]", wire.Body);
+    // The JSON escapes the angle brackets (`\u003C…\u003E`), so the id is matched between them.
+    Assert.Contains("\"Message-ID\":\"\\u003C" + Bare(sent.MessageId) + "\\u003E\"", wire.Body);
+  }
+}
+
+[Test(Desk)]
+void a_reply_carries_its_threading_headers_to_resend() {
+  runas (Ada) {
+    var first = Notify("cus@example.test", "Your ticket");
+    UnitOfWork.Commit();
+    var reply = Answer(first);
+    UnitOfWork.Commit();
+    Workflow.Settle(reply);
+  }
+  runas (Ada) {
+    var first = OutgoingMail.Single(m => m.Subject == "Your ticket");
+    var wire = WireLog.Single(w => w.Body.Contains("Re: Your ticket"));
+    Assert.Contains("\"In-Reply-To\":\"\\u003C" + Bare(first.MessageId) + "\\u003E\"", wire.Body);
+    Assert.Contains("\"References\":\"\\u003C" + Bare(first.MessageId) + "\\u003E\"", wire.Body);
+  }
+}
+
+/// `<abc@acme.test>` → `abc@acme.test`.
+string Bare(string messageId) { return messageId.Replace("<", "").Replace(">", ""); }

@@ -1,0 +1,44 @@
+namespace Osysharp.Mail.Resend;
+
+using Osysharp.Mail;
+using Osysharp.Resend;
+
+/// Resend, as the app's mail sender:
+///
+///   app.Mail = new MailSetup {
+///     Sender = new ResendSender { ApiKey = Security.IsSecretSet("ResendApiKey") ? Secret.ResendApiKey : "" },
+///     From = "Acme <noreply@acme.com>",
+///   };
+///
+/// With no key it is not READY, and the outbox holds mail rather than failing it — so an app runs, signs people up and
+/// resets passwords before anybody has set up an account with Resend, and its held mail is still there to read.
+///
+/// ⛔ THE KEY IS A SETTING, NOT A SECRET THIS PACKAGE NAMES: the app names its own secret, and this package never learns
+///    which — the same rule `ResendMailer` follows.
+public class ResendSender : IMailSender {
+  public string Key { get; } = "resend";
+  /// The API key — `Secret.ResendApiKey`, or empty while there is none.
+  public string ApiKey = "";
+  /// Resend's API root, unless you are pointed at a gateway that speaks the same wire.
+  public string BaseUrl = "https://api.resend.com";
+
+  public bool IsReady() { return ApiKey != ""; }
+
+  /// One message through Resend. Its Message-ID and threading headers travel as the mail's own headers, so a reply to it
+  /// threads in the reader's client and can be matched to it when it comes back.
+  public string SendMail(MailMessage message, string idempotencyKey) {
+    var headers = new Dictionary<string, string>();
+    foreach (var h in message.Headers) { headers.Add(h.Key, h.Value); }
+    if (message.MessageId != "") { headers.Add("Message-ID", message.MessageId); }
+    if (message.InReplyTo != "") { headers.Add("In-Reply-To", message.InReplyTo); }
+    if (message.References.Count > 0) { headers.Add("References", string.Join(" ", message.References)); }
+    List<EmailAttachment> files = [];
+    foreach (var f in message.Attachments) {
+      files.Add(new EmailAttachment { Filename = f.FileName, Content = f.Content, ContentType = f.ContentType, ContentId = f.ContentId });
+    }
+    return new ResendMailer { ApiKey = ApiKey, BaseUrl = BaseUrl }.Send(new EmailMessage {
+      From = message.From, To = message.To, Cc = message.Cc, Bcc = message.Bcc, ReplyTo = message.ReplyTo,
+      Subject = message.Subject, Text = message.Text, Html = message.Html, Attachments = files, Headers = headers,
+    }, idempotencyKey);
+  }
+}

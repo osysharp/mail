@@ -1,0 +1,13 @@
+// The producer's test project for Osysharp.Mail.Resend — a message through the outbox, asserted on the JSON that
+// reaches Resend's API (every test stubs `Http.Post`, so nothing leaves the process).
+app MailResendKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Mail@0;
+  use Osysharp.Mail.Resend@0 { egress "api.resend.com"; }
+  use Osysharp.Resend@0 { egress "api.resend.com"; }
+  use Osysharp.Workflow;
+  use Osysharp.Http;
+}
+

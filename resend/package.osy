@@ -1,0 +1,17 @@
+// Osysharp.Mail.Resend — Resend as an `Osysharp.Mail` sender.
+//
+// ⚑ WHY THIS IS A PACKAGE OF ITS OWN, and not a class inside Osysharp.Resend: the mail contract is people-aware (its
+//   outbox is guarded by `Osysharp.Identity`), and an app has ONE `[Principal]`. Had Osysharp.Resend itself taken the
+//   contract, every app already using Resend with an account model of its own — the shop's `ShopAccount` — would have
+//   been handed a second principal and refused. Resend's own API is untouched; this is the ten lines that adapt it.
+package Osysharp.Mail.Resend {
+  version     "0.1.0";
+  minPlatform "0.9.0";
+  summary     "Resend as a sender for Osysharp.Mail — threading headers and attachments included.";
+  model "model/*.osy";
+  use Osysharp.Mail@0;
+  use Osysharp.Resend@0 { egress "api.resend.com"; }
+  use Osysharp.Http;
+  egress "api.resend.com";
+  tests "tests";
+}

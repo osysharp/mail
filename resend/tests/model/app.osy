@@ -1,0 +1,37 @@
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Resend;
+
+[Role] enum AppRole { Authenticator, Agent }
+
+policy IsAgent => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Agent);
+
+entity Person : Principal {
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+    allow update when IsAuthenticated || IsAuthenticator where Id == user.Id;
+    allow update when IsAuthenticator;
+  }
+}
+
+partial entity OutgoingMail { security { allow create, read when IsAgent; } }
+partial entity OutgoingMailFile { security { allow create, read when IsAgent; } }
+
+/// In a real app the key is `Secret.ResendApiKey`; a literal here, because every test stubs the HTTP call.
+app.Mail = new MailSetup { Sender = new ResendSender { ApiKey = "re_test_key" }, From = "Acme <support@acme.test>" };
+
+OutgoingMail Notify(string to, string subject) {
+  return SendMail(new MailMessage { To = [to], Subject = subject, Text = "Hello." });
+}
+
+/// What reached the wire — one row per HTTP post the stub answered.
+entity WireLog {
+  [Required, MaxLength(300)] string Url;
+  [Required] string Body;
+  security { allow read, create when IsAuthenticated || IsAnonymous; }
+}
+
+OutgoingMail Answer(OutgoingMail original) {
+  return SendMail(ReplyTo(original, "Thanks."));
+}
