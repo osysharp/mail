@@ -1,0 +1,230 @@
+// Osysharp.Mail — every test asserts what the CARRIER received (the `Carried` rows the recording sender writes), or
+// what the outbox says happened, never merely that a call returned.
+
+using Osysharp.Identity;
+using Osysharp.Mail;
+using MailKitTests;
+
+[TestFixture]
+void Desk() {
+  var ada = new Person { Email = "ada@acme.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  new Person { Email = "cus@example.test", DisplayName = "Cus" };
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@acme.test");
+principal Cus => Person.Single(p => p.Email == "cus@example.test");
+
+[Test(Desk)]
+void a_message_goes_after_the_commit_and_is_recorded_as_sent() {
+  runas (Ada) {
+    var mail = Notify("cus@example.test", "Your ticket", "We are on it.");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  runas (Ada) {
+    var sent = OutgoingMail.Single(m => m.Subject == "Your ticket");
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.Equal("recording", sent.SentWith);
+    Assert.Equal("carried-Your ticket", sent.ProviderId);
+    var carried = Carried.Single(c => c.Subject == "Your ticket");
+    Assert.Equal("cus@example.test", carried.To);
+    Assert.Equal(sent.MessageId, carried.MessageId);
+    Assert.True(carried.MessageId.EndsWith("@acme.test>"));
+  }
+}
+
+[Test(Desk)]
+void a_reply_threads_to_the_message_it_answers() {
+  runas (Ada) {
+    var first = Notify("cus@example.test", "Your ticket", "We are on it.");
+    UnitOfWork.Commit();
+    var second = Answer(first, "Fixed now.");
+    UnitOfWork.Commit();
+    Workflow.Settle(second);
+  }
+  runas (Ada) {
+    var first = OutgoingMail.Single(m => m.Subject == "Your ticket");
+    var carried = Carried.Single(c => c.Subject == "Re: Your ticket");
+    Assert.Equal(first.MessageId, carried.InReplyTo);
+    Assert.Equal(first.MessageId, carried.References);
+  }
+}
+
+[Test(Desk)]
+void the_same_key_twice_is_one_message() {
+  runas (Ada) {
+    Notify("cus@example.test", "Receipt", "Thanks.", "receipt-1");
+    UnitOfWork.Commit();
+    Notify("cus@example.test", "Receipt", "Thanks.", "receipt-1");
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { Assert.Equal(1, OutgoingMail.Count(m => m.Subject == "Receipt")); }
+}
+
+[Test(Desk)]
+void a_file_travels_with_its_message() {
+  runas (Ada) {
+    var mail = NotifyWithFile("cus@example.test");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  runas (Ada) { Assert.Equal(1, Carried.Single(c => c.Subject == "Your invoice").Files); }
+}
+
+[Test(Desk)]
+void with_no_ready_sender_the_mail_is_held_and_says_why() {
+  runas (Ada) { new SenderState { Unconfigured = true }; }
+  runas (Ada) {
+    var mail = Notify("cus@example.test", "Held one", "…");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  runas (Ada) {
+    var held = OutgoingMail.Single(m => m.Subject == "Held one");
+    Assert.Equal(MailStatus.Held, held.Status);
+    // `RecordingSender` does not declare `NotReadyReason`, so this is the CONTRACT's default body — reading the
+    // sender's own `Key` back through `this`.
+    Assert.Equal("The mail sender 'recording' is not ready — its credentials are not set.", held.Problem);
+    Assert.False(Carried.Any(c => c.Subject == "Held one"));
+  }
+}
+
+[Test(Desk)]
+void a_carrier_that_is_down_leaves_the_mail_waiting_to_be_retried() {
+  runas (Ada) { new SenderState { Down = true }; }
+  runas (Ada) {
+    var mail = Notify("cus@example.test", "Retry me", "…");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  runas (Ada) { Assert.Equal(MailStatus.Queued, OutgoingMail.Single(m => m.Subject == "Retry me").Status); }
+}
+
+[Test(Desk)]
+void a_message_with_no_body_is_refused_where_it_was_written() {
+  runas (Ada) { Assert.Throws(() => NoBody("cus@example.test")); }
+}
+
+[Test(Desk)]
+void nobody_the_app_did_not_name_can_send_mail_in_its_name() {
+  runas (Cus) { Assert.Denied(() => Notify("victim@example.test", "Hello", "Spam.")); }
+}
+
+[Test(Desk)]
+void a_recipient_cannot_read_their_mail_out_of_the_outbox() {
+  runas (Ada) { Notify("cus@example.test", "Your code", "The code is 123456."); }
+  // The agent the app granted reads it…
+  runas (Ada) { Assert.True(OutgoingMail.Any(m => m.Subject == "Your code")); }
+  // …and the person it is addressed to does not: a code read out of the outbox proves nothing about their mailbox.
+  runas (Cus) { Assert.False(OutgoingMail.Any(m => m.Subject == "Your code")); }
+}
+
+[Test(Desk)]
+void erasing_an_address_forgets_the_mail_sent_to_it_and_keeps_the_others_record() {
+  runas (Ada) {
+    Notify("cus@example.test", "Your ticket", "We are on it.");
+    SendMail(new MailMessage { To = ["cus@example.test", "boss@example.test"], Subject = "The two of you",
+                               Text = "Both of you, please confirm." });
+    Notify("other@example.test", "Someone else", "Not about Cus.");
+    UnitOfWork.Commit();
+    Assert.Equal(2, EraseMailTo("Cus@Example.test"));
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    // Hers alone: gone. Shared: the other recipient's record stays, without her address or the words.
+    Assert.Equal(0, OutgoingMail.Count(m => m.To.Contains("cus@example.test")));
+    var shared = OutgoingMail.Single(m => m.To == "boss@example.test");
+    Assert.Equal("[erased]", shared.Text);
+    Assert.Equal(1, OutgoingMail.Count(m => m.To == "other@example.test"));
+  }
+}
+
+[Test(Desk)]
+void erasing_an_address_never_reaches_mail_to_an_address_that_merely_contains_it() {
+  runas (Ada) {
+    Notify("ann@example.test", "For Ann", "Ann's words.");
+    Notify("joann@example.test", "For Joann", "Joann's words.");
+    UnitOfWork.Commit();
+    Assert.Equal(1, EraseMailTo("ann@example.test"));
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    // Joann's mail is untouched: still hers, still its words.
+    var joann = OutgoingMail.Single(m => m.To == "joann@example.test");
+    Assert.Equal("Joann's words.", joann.Text);
+    Assert.Equal("For Joann", joann.Subject);
+    Assert.Equal(0, OutgoingMail.Count(m => m.To == "ann@example.test"));
+  }
+}
+
+[Test(Desk)]
+void a_reply_from_the_mailbox_goes_out_through_it_threaded() {
+  runas (Ada) {
+    var reply = SendMail(new MailMessage {
+      From = "Acme Help <help@acme.test>", To = ["cus@example.test"], Subject = "Re: The export is broken",
+      Text = "Fixed — try again.", InReplyTo = "<new@example.test>", References = ["<new@example.test>"],
+    });
+    UnitOfWork.Commit();
+    Workflow.Settle(reply);
+  }
+  runas (Ada) {
+    var sent = OutgoingMail.Single(m => m.Subject == "Re: The export is broken");
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.Equal("fake", sent.SentWith);
+    // Not through the app's default sender…
+    Assert.False(Carried.Any(c => c.Subject == "Re: The export is broken"));
+    // …but as RFC 5322 bytes through the mailbox, carrying the thread.
+    var wire = ParseMail(SentFromMailbox.Single(s => s.Subject == "Re: The export is broken").Raw);
+    Assert.Equal("<new@example.test>", wire.InReplyTo);
+    Assert.Equal(sent.MessageId, wire.MessageId);
+    Assert.Equal("Acme Help <help@acme.test>", wire.From);
+    Assert.Contains("Fixed", wire.Text ?? "");
+  }
+}
+
+[Test(Desk)]
+void a_message_to_be_forgotten_once_sent_keeps_only_that_it_went() {
+  runas (Ada) {
+    var mail = SendMail(new MailMessage { To = ["cus@example.test"], Subject = "Your data was erased",
+                                          Text = "We erased what we held about cus@example.test.", ForgetOnceSent = true });
+    UnitOfWork.Commit();
+    // Not sent yet: everything is kept, so it can still go.
+    Assert.Equal("cus@example.test", OutgoingMail.Single(m => m.Id == mail.Id).To);
+    Workflow.Settle(mail);
+  }
+  runas (Ada) {
+    var sent = OutgoingMail.Single(m => m.SentWith == "recording" && m.ForgetOnceSent);
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.NotNull(sent.SentAt);
+    Assert.Equal("[erased]", sent.To);
+    Assert.Equal("[erased]", sent.Subject);
+    Assert.Null(sent.Text);
+    // The carrier got it whole — the outbox's copy is what is forgotten.
+    Assert.Equal("cus@example.test", Carried.Single(c => c.Subject == "Your data was erased").To);
+    // An ordinary message keeps what it was.
+    var plain = Notify("cus@example.test", "Your ticket", "We are on it.");
+    UnitOfWork.Commit();
+    Workflow.Settle(plain);
+    Assert.Equal("cus@example.test", OutgoingMail.Single(m => m.Subject == "Your ticket").To);
+  }
+}
+
+/// One sent mail is forgotten by its Message-ID — what a conversation channel does when the message it carried is erased:
+/// its words and recipients go, that it went stays, and the mail beside it is untouched.
+[Test(Desk)]
+void one_sent_mail_is_forgotten_by_its_message_id() {
+  runas (Ada) {
+    var one = Notify("supplier@example.test", "About order 4471", "Where is the parcel for Cus?");
+    var other = Notify("supplier@example.test", "About order 4472", "And this one?");
+    UnitOfWork.Commit();
+    Workflow.Settle(one);
+    Workflow.Settle(other);
+    Assert.Equal(1, ForgetSentMail(OutgoingMail.Single(m => m.Id == one.Id).MessageId));
+    var forgotten = OutgoingMail.Single(m => m.Id == one.Id);
+    Assert.Equal(MailStatus.Sent, forgotten.Status);
+    Assert.Equal("[erased]", forgotten.Subject);
+    Assert.Null(forgotten.Text);
+    Assert.Equal("And this one?", OutgoingMail.Single(m => m.Id == other.Id).Text);
+  }
+}

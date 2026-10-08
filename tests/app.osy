@@ -1,0 +1,10 @@
+// The producer's test project for Osysharp.Mail — an app with a sender of its own that records what it was handed, so
+// the tests can assert what a carrier actually received.
+app MailKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Mail@0;
+  use Osysharp.Workflow;
+}
+

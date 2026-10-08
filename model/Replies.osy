@@ -1,0 +1,182 @@
+namespace Osysharp.Mail;
+
+// REPLY EXTRACTION (0.5.0, D-RECEIVE1 addendum) — the part of a reply the person just wrote, apart from the history their
+// mail client quoted under it, so a timeline shows what was SAID rather than every earlier message again.
+//
+// ⚑ STRUCTURE FIRST, TEXT SECOND. A mail client marks what it quoted, and that mark is exact where it exists: Gmail's
+//   `gmail_quote`, Outlook's reply header block (`divRplyFwdMsg`, `appendonsend`, the border-top header), Apple Mail's and
+//   Thunderbird's `<blockquote type="cite">` (with Thunderbird's `moz-cite-prefix`), Yahoo's `yahoo_quoted`. Only a mail
+//   with no such mark — plain text, or HTML a client wrote without one — is read by its words: an attribution line ("On …
+//   wrote:", in the languages a desk meets), Outlook's "-----Original Message-----" and its From/Sent/To block, `>`
+//   lines, the `-- ` signature separator, and a phone's "Sent from my …".
+//
+// ⚑ NOTHING IS LOST, AND UNSURE SHOWS EVERYTHING. The split never deletes: what is not the new part is `Quoted`, kept for
+//   "Show quoted text". And a split that would leave nothing new — a forward with no comment, a reply written inline
+//   between the quoted lines — is not trusted: the whole message is the new part, and `Sure` says so.
+
+/// A received message, split into what was just written and what was quoted under it.
+public class ReplySplit {
+  /// What the person wrote this time — plain text.
+  public string New = "";
+  /// The quoted history, the signature, the "Sent from my phone" — kept, shown on request. "" when there was none.
+  public string Quoted = "";
+  /// False when no boundary could be trusted and `New` is the whole message.
+  public bool Sure = true;
+}
+
+/// Split a received message's body into the new part and the quoted part. Reads the HTML when there is some (its
+/// structure is exact), else the text.
+public ReplySplit SplitReply(string? text, string? html) {
+  if (html != null && html.Trim() != "") {
+    var cut = BeforeQuoteMarkup(html);
+    if (cut.Length < html.Length) {
+      var fresh = WithoutTrailingAttribution(PlainTextOf(cut));
+      var quoted = PlainTextOf(html.Substring(cut.Length));
+      return Decided(fresh, quoted, PlainTextOf(html));
+    }
+    // HTML with no mark of its own: read its words.
+    return SplitText(PlainTextOf(html));
+  }
+  return SplitText(text ?? "");
+}
+
+/// A plain-text body, split by its words: the first attribution line, Outlook's original-message header, a run of `>`
+/// lines, the signature separator or a phone's signature — whichever comes first.
+public ReplySplit SplitText(string body) {
+  var text = body.Replace("\r\n", "\n");
+  var lines = text.Split("\n").ToList();
+  var at = -1;
+  for (var i = 0; i < lines.Count && at < 0; i++) {
+    var line = lines[i].Trim();
+    // A quoted line — and the attribution line that introduced the quote, when there is one just above it.
+    if (line.StartsWith(">")) {
+      at = i;
+      if (i > 0 && IsAttribution(lines[i - 1].Trim())) { at = i - 1; }
+      else if (i > 1 && lines[i - 1].Trim() == "" && IsAttribution(lines[i - 2].Trim())) { at = i - 2; }
+      continue;
+    }
+    if (IsAttribution(line)) { at = i; continue; }
+    // An attribution a client wrapped onto two lines ("On Thu, 1 Oct 2026 at 09:30, Ada Lovelace" / "<ada@x> wrote:").
+    if (i + 1 < lines.Count && IsAttribution(line + " " + lines[i + 1].Trim()) && !IsAttribution(lines[i + 1].Trim())) {
+      at = i;
+      continue;
+    }
+    if (IsOriginalMessageMark(line) || IsOutlookHeaderBlock(lines, i) || IsSignatureMark(lines[i])) { at = i; }
+  }
+  if (at < 0) { return new ReplySplit { New = text.Trim(), Quoted = "", Sure = true }; }
+  var fresh = string.Join("\n", lines.Take(at)).Trim();
+  var quoted = string.Join("\n", lines.Skip(at)).Trim();
+  return Decided(fresh, quoted, text);
+}
+
+/// A split is trusted only when it leaves something new. Otherwise everything is new, and unsure.
+ReplySplit Decided(string fresh, string quoted, string whole) {
+  if (fresh.Trim() == "") { return new ReplySplit { New = whole.Trim(), Quoted = "", Sure = false }; }
+  return new ReplySplit { New = fresh.Trim(), Quoted = quoted.Trim(), Sure = true };
+}
+
+/// The HTML BEFORE the first quote a mail client marked — the whole of it when there is no mark.
+string BeforeQuoteMarkup(string html) {
+  List<string> marks = [
+    // Gmail (and Google Workspace): the quoted reply, and its older "extra" wrapper.
+    "<div[^>]*class=\"[^\"]*gmail_quote",
+    "<div[^>]*class=\"[^\"]*gmail_extra",
+    // Outlook (desktop, web, mobile): the reply/forward header block, and where it appends what it sends.
+    "<div[^>]*id=\"?divRplyFwdMsg",
+    "<div[^>]*id=\"?appendonsend",
+    "<hr[^>]*id=\"?stopSpelling",
+    "<div[^>]*style=\"[^\"]*border:\\s*none;\\s*border-top:\\s*solid\\s+#[eE]1[eE]1[eE]1",
+    "<div[^>]*class=\"[^\"]*OutlookMessageHeader",
+    // Thunderbird: the attribution line before its cite; Yahoo's and Proton's own wrappers.
+    "<div[^>]*class=\"[^\"]*moz-cite-prefix",
+    "<div[^>]*class=\"[^\"]*yahoo_quoted",
+    "<div[^>]*class=\"[^\"]*protonmail_quote",
+    // Apple Mail, Thunderbird and most others: the cited message itself.
+    "<blockquote[^>]*type=\"?cite",
+  ];
+  var cut = html;
+  foreach (var mark in marks) {
+    var before = Regex.Split(html, "(?i)" + mark)[0];
+    if (before.Length < cut.Length) { cut = before; }
+  }
+  return cut;
+}
+
+/// The new part without an attribution line its client left ABOVE the quote it marked ("On … wrote:" sits outside
+/// Apple Mail's blockquote).
+string WithoutTrailingAttribution(string fresh) {
+  var lines = fresh.Trim().Split("\n").ToList();
+  while (lines.Count > 0 && lines[lines.Count - 1].Trim() == "") { lines.RemoveAt(lines.Count - 1); }
+  if (lines.Count > 0 && IsAttribution(lines[lines.Count - 1].Trim())) { lines.RemoveAt(lines.Count - 1); }
+  else if (lines.Count > 1 && IsAttribution(lines[lines.Count - 2].Trim() + " " + lines[lines.Count - 1].Trim())) {
+    lines.RemoveAt(lines.Count - 1);
+    lines.RemoveAt(lines.Count - 1);
+  }
+  return string.Join("\n", lines).Trim();
+}
+
+/// "On … wrote:" in the languages a desk meets — a line that introduces a quote. Anchored at both ends, so a sentence
+/// that merely MENTIONS writing is not one.
+bool IsAttribution(string line) {
+  if (line.Length < 8 || line.Length > 400) { return false; }
+  // The short forms ("… wrote:", "… skrev:") are the ones an ordinary sentence could end in — "Here is what my manager
+  // wrote:" — so they count only beside an address or a date, which a client's attribution always carries.
+  var evidence = line.Contains("@") || Regex.IsMatch(line, "[0-9]");
+  if (evidence && Regex.IsMatch(line, "(?i)^.+ (wrote|skrev|schrieb):?$")) { return true; }
+  List<string> patterns = [
+    "^On .+ wrote:?$",                         // English — Gmail, Apple, Thunderbird
+    "^Den .+ skrev .+:$",                      // Swedish — Gmail ("Den tors 1 okt. 2026 kl 09:30 skrev …:")
+    "^Am .+ schrieb .+:$",                     // German
+    "^Le .+ a [ée]crit ?:$",                   // French
+    "^El .+ escribi[óo]:$",                    // Spanish
+    "^Il .+ ha scritto:$",                     // Italian
+    "^Op .+ schreef .+:$",                     // Dutch
+    "^Em .+ escreveu:$",                       // Portuguese
+    "^W dniu .+ napisa[łl](\\(a\\))?:$",       // Polish
+    "^.+ kirjoitti:$",                         // Finnish
+  ];
+  foreach (var p in patterns) {
+    if (Regex.IsMatch(line, "(?i)" + p)) { return true; }
+  }
+  return false;
+}
+
+/// Outlook's and others' "-----Original Message-----", in the languages a desk meets, and the long underscore rule
+/// Outlook writes above a reply header.
+bool IsOriginalMessageMark(string line) {
+  return Regex.IsMatch(line, "(?i)^-{2,}\\s*(Original Message|Ursprüngliche Nachricht|Message d'origine|Mensaje original|"
+                             + "Messaggio originale|Ursprungligt meddelande|Oorspronkelijk bericht|Forwarded message|"
+                             + "Vidarebefordrat meddelande|Weitergeleitete Nachricht)\\s*-{2,}$")
+      || Regex.IsMatch(line, "^_{20,}$");
+}
+
+/// Outlook's header block in plain text — "From: …" then "Sent: …" (or "Date:") within the next two lines, in the
+/// languages a desk meets.
+bool IsOutlookHeaderBlock(List<string> lines, int i) {
+  var from = "(?i)^\\*?(From|Från|Von|De|Van|Da|Fra|Od)\\s?:\\*?\\s+\\S";
+  var sent = "(?i)^\\*?(Sent|Date|Skickat|Gesendet|Datum|Envoyé|Enviado|Verzonden|Inviato|Sendt|Wysłane)\\s?:\\*?\\s+\\S";
+  if (!Regex.IsMatch(lines[i].Trim(), from)) { return false; }
+  for (var j = i + 1; j < lines.Count && j <= i + 2; j++) {
+    if (Regex.IsMatch(lines[j].Trim(), sent)) { return true; }
+  }
+  return false;
+}
+
+/// The signature separator `-- ` (RFC 3676), and the signatures phones add.
+bool IsSignatureMark(string line) {
+  if (line == "-- " || line == "--") { return true; }
+  return Regex.IsMatch(line.Trim(), "(?i)^(Sent from my|Skickat från min|Von meinem|Envoyé de mon|Enviado desde mi|"
+                                   + "Inviato da|Verzonden vanaf mijn|Sendt fra min|Get Outlook for) ");
+}
+
+/// HTML as the plain text a reader sees — tags dropped, blocks and breaks as new lines, entities read, blank runs closed.
+public string PlainTextOf(string html) {
+  var t = Regex.Replace(html, "(?is)<(head|style|script)[^>]*>.*?</\\1>", "");
+  t = Regex.Replace(t, "(?i)<br\\s*/?>", "\n");
+  t = Regex.Replace(t, "(?i)</(p|div|li|tr|h[1-6]|blockquote|pre)>", "\n");
+  t = Regex.Replace(t, "<[^>]+>", "");
+  t = WebUtility.HtmlDecode(t).Replace("\u00a0", " ").Replace("\r\n", "\n");
+  t = Regex.Replace(t, "[ \\t]+\n", "\n");
+  t = Regex.Replace(t, "\n{3,}", "\n\n");
+  return t.Trim();
+}

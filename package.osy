@@ -1,0 +1,24 @@
+// Osysharp.Mail — the contract between an app that sends mail and whatever carries it, and the outbox in between.
+//
+// An app (or a kit — Osysharp.Accounts' reset links) calls `SendMail` and moves on: the message is a row in the outbox,
+// written in the same commit as whatever it is about, and delivered after that commit through the app's sender. A
+// sender that is down retries; an app with no sender at all still works — its mail is HELD in the outbox, where
+// somebody can read it, instead of lost.
+//
+// ⚑ A SENDER IS AN INTERFACE (`IMailSender`), so the app picks one and nothing that sends changes when it does. A
+//   transactional provider is one (`Osysharp.Mail.Resend`); a mailbox the app is connected to and SENDS AS is another
+//   (reserved for a later version — see README). Every message carries its Message-ID and its threading headers, because a
+//   reply has to land in the conversation it answers.
+package Osysharp.Mail {
+  version     "0.9.0";
+  minPlatform "0.9.0";
+  summary     "mail an app sends — one message shape, a pluggable sender, an outbox that delivers after the commit and holds mail when there is no sender; connected mailboxes it sends from (and, with Osysharp.Mail.Receiving, reads); MIME parsing and reply extraction.";
+  model "model/*.osy";
+  // The personal data its own fields hold (`[Classification(Personal.X)]`): an app maps a level onto its own
+  // classification, or leaves it to each row's own security.
+  personal Contact;
+  personal Content;
+  use Osysharp.Identity@0;
+  use Osysharp.Workflow;
+  tests "tests";
+}

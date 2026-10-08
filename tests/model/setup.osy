@@ -1,0 +1,12 @@
+// The app's mail setup. In a file of its own with no `namespace`, because an `app.X = …` statement's value is resolved
+// outside the file's namespace — the `using` below is what lets it name the app's own sender.
+using Osysharp.Mail;
+using MailKitTests;
+
+app.Mail = new MailSetup {
+  Sender = new RecordingSender(),
+  From = "Acme Support <support@acme.test>",
+  // A connected mailbox: mail From it goes out through it. Its address is deliberately not `From`, so mail from the
+  // default sender still goes through `Sender`.
+  Mailboxes = [new FakeMailbox { Address = "help@acme.test" }],
+};

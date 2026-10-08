@@ -1,0 +1,282 @@
+namespace Osysharp.Mail;
+
+using Osysharp.Identity;
+using Osysharp.Workflow;
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum MailStatus {
+  [Label("Waiting")] Queued,
+  [Label("Sent")] Sent,
+  [Label("Not sent — no mail sender")] Held,
+}
+
+/// A message the app sent — written in the caller's commit, delivered after it (`OutgoingMailDelivery`). It is the
+/// delivery record too: when it went, through what, and the carrier's id for it.
+///
+/// ⚑ THE APP DECIDES WHO SENDS, so this is `Extensible`: the package grants the one sender it knows — the sign-in flow,
+///   which mails reset links and verifications — and an app grants its own people:
+///     `partial entity OutgoingMail { security { allow create, read when IsAgent; } }`
+///   Nothing else can put a row here, so nobody can use the app to send mail in its name to anybody they like.
+[Authority(Extensible)]
+public entity OutgoingMail {
+  /// The recipients, comma-separated.
+  [Required, Classification(Personal.Contact), MaxLength(1000)] string To;
+  [Classification(Personal.Contact), MaxLength(1000)] string? Cc;
+  [Classification(Personal.Contact), MaxLength(1000)] string? Bcc;
+  [Classification(Personal.Contact), MaxLength(1000)] string? ReplyTo;
+  /// The sender; null is `app.Mail.From` at the time it is sent.
+  [MaxLength(255)] string? From;
+  [Required, Classification(Personal.Content), MaxLength(300)] string Subject;
+  [Classification(Personal.Content)] string? Text;
+  [Classification(Personal.Content)] string? Html;
+  /// The mail's own headers, as JSON (`{"List-Unsubscribe": "<…>"}`).
+  string? Headers;
+  /// This message's RFC 5322 id, minted when it was written — so the app can thread a reply to it before it has even
+  /// gone.
+  [Required, Unique, MaxLength(255)] string MessageId;
+  [MaxLength(255)] string? InReplyTo;
+  /// The conversation's ids, oldest first, space-separated.
+  string? References;
+  /// A key the caller gave: the same key twice is one message, not two.
+  [Unique, MaxLength(200)] string? IdempotencyKey;
+  MailStatus Status;                                   // no default — OutgoingMailDelivery owns it
+  DateTime? SentAt;
+  /// The sender it went through (`IMailSender.Key`) and the carrier's id for it.
+  [MaxLength(40)] string? SentWith;
+  [MaxLength(120)] string? ProviderId;
+  /// Why it was held, or why the last attempt failed.
+  [MaxLength(500)] string? Problem;
+  [ForeignKey(Mail)] OutgoingMailFile[] Files;
+  /// Forget who it went to and what it said once it is sent (`MailMessage.ForgetOnceSent`).
+  bool ForgetOnceSent;
+  security {
+    // SECURITY-INVARIANT(mail-outbox-is-not-the-mailbox): the sign-in flow reads what it sent, and nobody else reads the
+    // outbox unless the app grants it — NOT EVEN THE RECIPIENT. A reset link or a verification code sits in these rows,
+    // and a signed-in person who could read the mail addressed to them could take the code without ever receiving it,
+    // which is the one thing mailing it exists to prove. Guarded by tests/mail.test.osy
+    // (a_recipient_cannot_read_their_mail_out_of_the_outbox).
+    allow read when IsAuthenticator;
+    allow create when IsAuthenticator;
+  }
+}
+
+/// A file a message carries.
+[Authority(Extensible)]
+public entity OutgoingMailFile {
+  [Required] OutgoingMail Mail;
+  [Required, MaxLength(200)] string FileName;
+  [MaxLength(100)] string ContentType = "";
+  [MaxLength(127)] string ContentId = "";
+  [Required] byte[] Content;
+  security {
+    allow read when IsAuthenticator;
+    allow create when IsAuthenticator;
+  }
+}
+
+/// Delivers each message after the commit that wrote it.
+///
+/// ⚑ THE SEND IS A CLOCK DUE AT ONCE, NOT THE `enter`. A message is written inside somebody's commit, and an autostarted
+///   run's `enter` is part of that commit — it would wait on the carrier. So `enter` decides only what it can decide at
+///   once (is there a sender at all), and the send runs when the clock fires, after the commit. A throw there leaves the
+///   message Queued and the delivery is retried — what a carrier that is briefly down should get.
+public workflow OutgoingMailDelivery {
+  Tracks    = OutgoingMail.Status;
+  Autostart = true;
+  Initial   = Queued;
+
+  state Queued {
+    enter {
+      var setup = App.Setting<MailSetup>();
+      // A message FROM a connected mailbox goes out through that mailbox (0.5.0) — a reply leaves from the address the
+      // customer wrote to, and sits in its Sent folder.
+      var mailbox = MailboxAt(AddressPart(this.Item.From ?? setup.From));
+      if (mailbox != null) {
+        if (!mailbox.IsReady()) {
+          this.Item.Problem = mailbox.NotReadyReason();
+          goto Held;
+        }
+      } else {
+        var sender = setup.Sender;
+        if (sender == null || !sender.IsReady()) {
+          this.Item.Problem = sender == null
+            ? "No mail sender is set up — name one in app.Mail (`Sender = new ResendSender { … }`)."
+            : sender.NotReadyReason();
+          goto Held;
+        }
+      }
+    }
+    Expire { Within = TimeSpan.Zero; Accrues = false; }
+    on Expire {
+      var setup = App.Setting<MailSetup>();
+      var key = "mail-" + this.Item.Id.ToString();
+      var mailbox = MailboxAt(AddressPart(this.Item.From ?? setup.From));
+      if (mailbox != null) {
+        this.Item.ProviderId = mailbox.SendMail(MessageOf(this.Item, setup), key);
+        this.Item.SentWith = mailbox.Key;
+      } else {
+        var sender = setup.Sender!;
+        this.Item.ProviderId = sender.SendMail(MessageOf(this.Item, setup), key);
+        this.Item.SentWith = sender.Key;
+      }
+      this.Item.SentAt = DateTime.UtcNow;
+      this.Item.Problem = null;
+      if (this.Item.ForgetOnceSent) { ForgetSent(this.Item); }
+      goto Sent;
+    }
+  }
+
+  terminal success Sent { }
+  terminal cancel Held { }
+}
+
+// ── sending ──────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Put a message in the outbox. It goes once the caller's commit does — never before, so a mail about something that
+/// was rolled back is never sent. Answers the outbox row, whose `MessageId` a reply can thread to at once.
+///
+/// `idempotencyKey`: the same key twice is ONE message — a handler that runs twice (a redelivered event, a retried step)
+/// does not mail twice. Derive it from what the mail is about ("reset-<account>-<request>"), never from the time.
+public OutgoingMail SendMail(MailMessage message, string? idempotencyKey = null) {
+  if (idempotencyKey != null) {
+    var already = OutgoingMail.FirstOrDefault(m => m.IdempotencyKey == idempotencyKey);
+    if (already != null) { return already; }
+  }
+  if (message.To.Count == 0) { throw new ValidationException($"This mail has no recipient: set `To` on '{message.Subject}'."); }
+  if (message.Text == null && message.Html == null) {
+    throw new ValidationException($"This mail has no body: set `Text`, `Html` or both on '{message.Subject}'.");
+  }
+  var setup = App.Setting<MailSetup>();
+  var from = message.From != "" ? message.From : (setup.From != "" ? setup.From : null);
+  var row = new OutgoingMail {
+    To = string.Join(", ", message.To),
+    Cc = message.Cc.Count == 0 ? null : string.Join(", ", message.Cc),
+    Bcc = message.Bcc.Count == 0 ? null : string.Join(", ", message.Bcc),
+    ReplyTo = message.ReplyTo.Count > 0 ? string.Join(", ", message.ReplyTo) : (setup.ReplyTo == "" ? null : setup.ReplyTo),
+    From = from,
+    Subject = message.Subject,
+    Text = message.Text,
+    Html = message.Html,
+    Headers = message.Headers.Count == 0 ? null : JsonSerializer.Serialize(message.Headers),
+    MessageId = message.MessageId != "" ? message.MessageId : NewMessageId(from ?? ""),
+    InReplyTo = message.InReplyTo == "" ? null : message.InReplyTo,
+    References = message.References.Count == 0 ? null : string.Join(" ", message.References),
+    IdempotencyKey = idempotencyKey,
+    ForgetOnceSent = message.ForgetOnceSent,
+  };
+  foreach (var file in message.Attachments) {
+    new OutgoingMailFile { Mail = row, FileName = file.FileName, ContentType = file.ContentType, ContentId = file.ContentId,
+                           Content = file.Content };
+  }
+  return row;
+}
+
+/// What a sent message keeps when it is to be forgotten once sent: that it went — its id, when, through what, the
+/// carrier's id — and nothing of who it went to or what it said.
+void ForgetSent(OutgoingMail m) {
+  foreach (var f in m.Files.ToList()) { f.Delete(); }
+  m.To = "[erased]";
+  m.Cc = null;
+  m.Bcc = null;
+  m.ReplyTo = null;
+  m.Subject = "[erased]";
+  m.Text = null;
+  m.Html = null;
+  m.Headers = null;
+}
+
+/// Forget what the outbox holds of ONE sent mail, by its `Message-ID` — its words, files and recipients; that it went
+/// stays. What a conversation channel calls when the message it carried is erased. Answers how many it reached.
+[SuppressWarning("cost-unbounded-read")]   // the outbox rows of one message id — one, or a few copies
+public int ForgetSentMail(string messageId) {
+  var n = 0;
+  foreach (var m in OutgoingMail.Where(m => m.MessageId == messageId).ToList()) { ForgetSent(m); n = n + 1; }
+  return n;
+}
+
+/// Forget what the outbox holds of mail to `address` — a person exercising their right to erasure. A mail to them alone
+/// is deleted, with its files; one they were among several recipients of keeps its row (the others' record) with the
+/// address and the words gone. Runs as whatever erases (a workflow, as the system); the app decides who may ask.
+[SuppressWarning("cost-unbounded-read")]   // one person's mail — an erasure reaches every one
+public int EraseMailTo(string address) {
+  var a = address.Trim().ToLower();
+  if (a == "") { return 0; }
+  var reached = 0;
+  // `Contains` only narrows the read; a mail is theirs only when one of its recipients IS the address — `ann@x.com` must
+  // never reach mail sent to `joann@x.com`, whose files and words would otherwise go with it.
+  foreach (var m in OutgoingMail.Where(m => m.To.ToLower().Contains(a)).ToList()) {
+    if (!Addresses(m.To).Any(t => IsAddress(t, a))) { continue; }
+    var others = Addresses(m.To).Where(t => !IsAddress(t, a)).ToList();
+    foreach (var f in m.Files.ToList()) { f.Delete(); }
+    if (others.Count == 0) {
+      m.Delete();
+    } else {
+      m.To = string.Join(", ", others);
+      m.Subject = "[erased]";
+      m.Text = "[erased]";
+      m.Html = null;
+    }
+    reached = reached + 1;
+  }
+  return reached;
+}
+
+/// A rendered template (an `[Email]` component's answer) to one address — the commonest mail there is.
+public OutgoingMail SendRendered(string to, RenderedEmail mail, string? idempotencyKey = null) {
+  return SendMail(new MailMessage {
+    To = [to], Subject = mail.Subject, Text = mail.Text, Html = mail.Html == "" ? null : mail.Html,
+  }, idempotencyKey);
+}
+
+/// A reply to a message, in its conversation: `In-Reply-To` is the message answered, `References` its chain plus it.
+public MailMessage ReplyTo(OutgoingMail original, string text, string? html = null) {
+  List<string> chain = [];
+  if (original.References != null) {
+    foreach (var id in original.References.Split(" ")) { if (id != "") { chain.Add(id); } }
+  }
+  chain.Add(original.MessageId);
+  var subject = original.Subject.StartsWith("Re: ") ? original.Subject : "Re: " + original.Subject;
+  return new MailMessage {
+    To = [original.To], Subject = subject, Text = text, Html = html,
+    InReplyTo = original.MessageId, References = chain,
+  };
+}
+
+/// A fresh RFC 5322 Message-ID on the sender's own domain — `<random@acme.com>`.
+public string NewMessageId(string from) {
+  var at = from.LastIndexOf("@");
+  var domain = at < 0 ? "mail.osyrin.invalid" : from.Substring(at + 1).Replace(">", "").Trim().ToLower();
+  if (domain == "") { domain = "mail.osyrin.invalid"; }
+  return "<" + Security.RandomId(24) + "@" + domain + ">";
+}
+
+/// An outbox row as the message a sender sends.
+public MailMessage MessageOf(OutgoingMail row, MailSetup setup) {
+  List<MailAttachment> files = [];
+  foreach (var f in row.Files) {
+    files.Add(new MailAttachment { FileName = f.FileName, ContentType = f.ContentType, ContentId = f.ContentId, Content = f.Content });
+  }
+  List<string> refs = [];
+  if (row.References != null) { foreach (var id in row.References.Split(" ")) { if (id != "") { refs.Add(id); } } }
+  return new MailMessage {
+    From = row.From ?? setup.From,
+    To = Addresses(row.To), Cc = Addresses(row.Cc), Bcc = Addresses(row.Bcc), ReplyTo = Addresses(row.ReplyTo),
+    Subject = row.Subject, Text = row.Text, Html = row.Html, Attachments = files,
+    Headers = row.Headers == null ? new Dictionary<string, string>() : JsonSerializer.Deserialize<Dictionary<string, string>>(row.Headers),
+    MessageId = row.MessageId, InReplyTo = row.InReplyTo ?? "", References = refs,
+  };
+}
+
+/// "a@x, b@y" → ["a@x", "b@y"].
+/// Is `recipient` — `ann@x.com` or `Ann <ann@x.com>` — exactly the (lower-cased, trimmed) `address`? Never a substring.
+bool IsAddress(string recipient, string address) {
+  var r = recipient.Trim().ToLower();
+  return r == address || r.EndsWith("<" + address + ">");
+}
+
+public List<string> Addresses(string? list) {
+  List<string> all = [];
+  if (list == null) { return all; }
+  foreach (var a in list.Split(",")) { if (a.Trim() != "") { all.Add(a.Trim()); } }
+  return all;
+}

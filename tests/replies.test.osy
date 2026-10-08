@@ -1,0 +1,124 @@
+// Osysharp.Mail 0.5.0 — REPLY EXTRACTION over a corpus of real-shaped replies: Gmail, Outlook desktop and on the web,
+// Apple Mail, Thunderbird, a phone; English, Swedish, German, French. Each is the body its client actually writes (the
+// markup and the attribution lines are theirs), read through `Mime.Parse` the way a received mail is. Every test asserts
+// what is NEW and what is QUOTED — and that nothing is lost: the quoted part is kept, not dropped.
+
+using Osysharp.Mail;
+
+/// A received mail with these parts, through the parser — the HTML and the text exactly as a client sends them.
+MailMessage Received(string text, string html) {
+  var raw = "From: Bo <bo@example.test>\nTo: support@acme.test\nSubject: Re: Export\nMessage-ID: <r@example.test>\n"
+    + "MIME-Version: 1.0\nContent-Type: multipart/alternative; boundary=\"b\"\n\n"
+    + "--b\nContent-Type: text/plain; charset=utf-8\n\n" + text + "\n"
+    + "--b\nContent-Type: text/html; charset=utf-8\n\n" + html + "\n--b--\n";
+  return ParseMail(Encoding.UTF8.GetBytes(raw));
+}
+
+[Test]
+void gmail_html_keeps_the_reply_and_quotes_the_gmail_quote() {
+  var mail = Received(
+    "Thanks, that fixed it!\n\nOn Thu, Oct 1, 2026 at 9:30 AM Acme Support <support@acme.test> wrote:\n\n> Please try restarting the export.",
+    """<div dir="ltr">Thanks, that fixed it!<br></div><br><div class="gmail_quote gmail_quote_container"><div dir="ltr" class="gmail_attr">On Thu, Oct 1, 2026 at 9:30 AM Acme Support &lt;<a href="mailto:support@acme.test">support@acme.test</a>&gt; wrote:<br></div><blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex"><div>Please try restarting the export.</div></blockquote></div>""");
+  var split = SplitReply(mail.Text, mail.Html);
+  Assert.True(split.Sure);
+  Assert.Equal("Thanks, that fixed it!", split.New);
+  Assert.Contains("Please try restarting the export.", split.Quoted);
+  Assert.Contains("wrote:", split.Quoted);
+}
+
+[Test]
+void outlook_desktop_cuts_at_its_header_block() {
+  var mail = Received(
+    "It still crashes on row 3.\n\nFrom: Acme Support <support@acme.test>\nSent: Thursday, October 1, 2026 9:30 AM\nTo: Bo <bo@example.test>\nSubject: RE: Export\n\nPlease try restarting the export.",
+    """<html xmlns:o="urn:schemas-microsoft-com:office:office"><head><style><!-- p.MsoNormal {margin:0cm;} --></style></head><body lang="SV"><div class="WordSection1"><p class="MsoNormal">It still crashes on row 3.<o:p></o:p></p><p class="MsoNormal"><o:p>&nbsp;</o:p></p><div><div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0cm 0cm 0cm"><p class="MsoNormal"><b>From:</b> Acme Support &lt;support@acme.test&gt; <br><b>Sent:</b> Thursday, October 1, 2026 9:30 AM<br><b>To:</b> Bo &lt;bo@example.test&gt;<br><b>Subject:</b> RE: Export<o:p></o:p></p></div></div><p class="MsoNormal">Please try restarting the export.<o:p></o:p></p></div></body></html>""");
+  var split = SplitReply(mail.Text, mail.Html);
+  Assert.Equal("It still crashes on row 3.", split.New);
+  Assert.Contains("Please try restarting the export.", split.Quoted);
+}
+
+[Test]
+void outlook_on_the_web_cuts_at_its_reply_block() {
+  var mail = Received(
+    "Attached the log.\n\n________________________________\nFrom: Acme Support <support@acme.test>\nSent: 01 October 2026 09:30\nTo: Bo\nSubject: Export\n\nPlease send the log.",
+    """<div dir="ltr"><div style="font-family: Aptos, sans-serif;">Attached the log.</div><div id="appendonsend"></div><hr style="display:inline-block;width:98%" tabindex="-1"><div id="divRplyFwdMsg" dir="ltr"><font face="Calibri, sans-serif" style="font-size:11pt"><b>From:</b> Acme Support &lt;support@acme.test&gt;<br><b>Sent:</b> 01 October 2026 09:30<br><b>To:</b> Bo<br><b>Subject:</b> Export</font><div>&nbsp;</div></div><div>Please send the log.</div></div>""");
+  var split = SplitReply(mail.Text, mail.Html);
+  Assert.Equal("Attached the log.", split.New);
+  Assert.Contains("Please send the log.", split.Quoted);
+}
+
+[Test]
+void apple_mail_drops_the_attribution_above_its_cite() {
+  var mail = Received(
+    "Here is a screenshot.\n\nOn 1 Oct 2026, at 09:30, Acme Support <support@acme.test> wrote:\n\n> Can you send a screenshot?",
+    """<html><head><meta http-equiv="content-type" content="text/html; charset=utf-8"></head><body style="overflow-wrap: break-word; -webkit-nbsp-mode: space;"><div>Here is a screenshot.</div><div><br><div>On 1 Oct 2026, at 09:30, Acme Support &lt;support@acme.test&gt; wrote:</div><br class="Apple-interchange-newline"><blockquote type="cite"><div><div>Can you send a screenshot?</div></div></blockquote></div><br></body></html>""");
+  var split = SplitReply(mail.Text, mail.Html);
+  Assert.Equal("Here is a screenshot.", split.New);
+  Assert.Contains("Can you send a screenshot?", split.Quoted);
+}
+
+[Test]
+void thunderbird_cuts_at_its_cite_prefix() {
+  var mail = Received(
+    "Done, thanks.\n\nOn 01/10/2026 09:30, Acme Support wrote:\n> Restart it.",
+    """<html><body><p>Done, thanks.</p><div class="moz-cite-prefix">On 01/10/2026 09:30, Acme Support wrote:<br></div><blockquote type="cite" cite="mid:abc@acme.test">Restart it.</blockquote></body></html>""");
+  var split = SplitReply(mail.Text, mail.Html);
+  Assert.Equal("Done, thanks.", split.New);
+  Assert.Contains("Restart it.", split.Quoted);
+}
+
+[Test]
+void swedish_gmail_plain_text_cuts_at_den_skrev() {
+  var split = SplitText("Tack, nu funkar det.\n\nDen tors 1 okt. 2026 kl 09:30 skrev Acme Support <support@acme.test>:\n\n> Prova att starta om exporten.");
+  Assert.Equal("Tack, nu funkar det.", split.New);
+  Assert.Contains("Prova att starta om exporten.", split.Quoted);
+}
+
+[Test]
+void swedish_outlook_plain_text_cuts_at_fran_skickat() {
+  var split = SplitText("Det fungerar inte.\n\nFrån: Acme Support <support@acme.test>\nSkickat: den 1 oktober 2026 09:30\nTill: Bo <bo@example.test>\nÄmne: SV: Export\n\nProva igen.");
+  Assert.Equal("Det fungerar inte.", split.New);
+  Assert.Contains("Prova igen.", split.Quoted);
+}
+
+[Test]
+void german_and_french_attributions_are_recognised() {
+  var de = SplitText("Danke!\n\nAm Do., 1. Okt. 2026 um 09:30 Uhr schrieb Acme Support <support@acme.test>:\n\n> Bitte neu starten.");
+  Assert.Equal("Danke!", de.New);
+  var fr = SplitText("Merci.\n\nLe 1 oct. 2026 à 09:30, Acme Support <support@acme.test> a écrit :\n\n> Redémarrez.");
+  Assert.Equal("Merci.", fr.New);
+  Assert.Contains("Redémarrez.", fr.Quoted);
+}
+
+[Test]
+void the_original_message_mark_and_the_signature_are_quoted_not_new() {
+  var original = SplitText("See below.\n\n-----Original Message-----\nFrom: Acme\nSent: Thursday\n\nOld text.");
+  Assert.Equal("See below.", original.New);
+  var signed = SplitText("See attached.\n\n-- \nBo Svensson\nAcme Customer AB");
+  Assert.Equal("See attached.", signed.New);
+  Assert.Contains("Bo Svensson", signed.Quoted);
+  var phone = SplitText("Yes please.\n\nSent from my iPhone\n\n> On 1 Oct 2026, at 09:30, Acme Support <support@acme.test> wrote:\n> Shall I close it?");
+  Assert.Equal("Yes please.", phone.New);
+}
+
+[Test]
+void a_forward_with_nothing_written_above_it_shows_everything_and_says_it_is_unsure() {
+  var split = SplitText("---------- Forwarded message ---------\nFrom: Cus <cus@example.test>\nDate: Thu, 1 Oct 2026\n\nThe printer is on fire.");
+  Assert.False(split.Sure);
+  Assert.Contains("The printer is on fire.", split.New);
+  Assert.Equal("", split.Quoted);
+}
+
+[Test]
+void a_sentence_that_merely_ends_in_wrote_is_not_a_quote() {
+  var split = SplitText("Here is what my manager wrote:\nThe export must finish by five.");
+  Assert.Equal("Here is what my manager wrote:\nThe export must finish by five.", split.New);
+  Assert.Equal("", split.Quoted);
+}
+
+[Test]
+void a_message_with_no_quote_is_all_new() {
+  var split = SplitReply("Just a new question about invoices.", null);
+  Assert.True(split.Sure);
+  Assert.Equal("Just a new question about invoices.", split.New);
+  Assert.Equal("", split.Quoted);
+}

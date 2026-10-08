@@ -1,0 +1,97 @@
+namespace MailKitTests;
+
+using Osysharp.Identity;
+using Osysharp.Mail;
+
+[Role] enum AppRole { Authenticator, Agent, Customer }
+
+policy IsAgent => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Agent);
+
+/// Somebody who signs in — the contract's base is enough for a mail test.
+entity Person : Principal {
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+    allow update when IsAuthenticated || IsAuthenticator where Id == user.Id;
+    allow update when IsAuthenticator;
+  }
+}
+
+// The app decides who of its people may send: its agents, and they read the outbox.
+partial entity OutgoingMail { security { allow create, read when IsAgent; allow update, delete when IsAgent; } }
+partial entity OutgoingMailFile { security { allow create, read when IsAgent; allow delete when IsAgent; } }
+
+/// What a carrier received — one row per message the sender was handed.
+entity Carried {
+  [Required, MaxLength(300)] string Subject;
+  [Required, MaxLength(1000)] string To;
+  [Required, MaxLength(255)] string MessageId;
+  [MaxLength(255)] string InReplyTo = "";
+  string References = "";
+  [MaxLength(200)] string Key = "";
+  int Files = 0;
+  security { allow read when IsAuthenticated; }
+}
+
+/// A switch the tests flip: the sender's credentials are missing, or its carrier is down.
+entity SenderState {
+  bool Unconfigured = false;
+  bool Down = false;
+  security { allow read, create when IsAuthenticated || IsAuthenticator; }
+}
+
+/// A sender that records instead of sending.
+public class RecordingSender : IMailSender {
+  public string Key { get; } = "recording";
+  public bool IsReady() { return !SenderState.Any(s => s.Unconfigured); }
+  public string SendMail(MailMessage message, string idempotencyKey) {
+    if (SenderState.Any(s => s.Down)) { throw new ExternalServiceException("The carrier is down."); }
+    new Carried { Subject = message.Subject, To = string.Join(", ", message.To), MessageId = message.MessageId,
+                  InReplyTo = message.InReplyTo, References = string.Join(" ", message.References), Key = idempotencyKey,
+                  Files = message.Attachments.Count };
+    return "carried-" + message.Subject;
+  }
+}
+
+
+/// An agent's reply to a customer.
+OutgoingMail Notify(string to, string subject, string text, string? key = null) {
+  return SendMail(new MailMessage { To = [to], Subject = subject, Text = text }, key);
+}
+
+OutgoingMail NotifyWithFile(string to) {
+  return SendMail(new MailMessage {
+    To = [to], Subject = "Your invoice", Text = "Attached.",
+    Attachments = [new MailAttachment { FileName = "invoice.pdf", ContentType = "application/pdf", Content = [1, 2, 3] }],
+  });
+}
+
+OutgoingMail Answer(OutgoingMail original, string text) {
+  return SendMail(ReplyTo(original, text));
+}
+
+OutgoingMail NoBody(string to) {
+  return SendMail(new MailMessage { To = [to], Subject = "Nothing" });
+}
+
+// ── a connected mailbox (0.5.0) — mail From it goes out THROUGH it ───────────────────────────────────────────────────
+
+/// What the mailbox was asked to SEND.
+entity SentFromMailbox {
+  [Required, MaxLength(300)] string Subject;
+  [Required, MaxLength(255)] string MessageId;
+  [Required] byte[] Raw;
+  security { allow read when IsAuthenticated; }
+}
+
+/// A connected mailbox that records what it sends. Reading it is Osysharp.Mail.Receiving's (its tests watch one).
+public class FakeMailbox : IMailbox {
+  public string Key { get; } = "fake";
+  public string Address { get; set; } = "";
+  public bool IsReady() { return Address != ""; }
+  public MailboxPage Fetch(string cursor, int max) { return new MailboxPage { Cursor = cursor }; }
+  public string SendMail(MailMessage message, string idempotencyKey) {
+    new SentFromMailbox { Subject = message.Subject, MessageId = message.MessageId, Raw = RawOf(message) };
+    return "fake-" + idempotencyKey;
+  }
+}

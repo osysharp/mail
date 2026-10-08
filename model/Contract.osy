@@ -1,0 +1,250 @@
+namespace Osysharp.Mail;
+
+// ── the message ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A file that travels with a message. With a `ContentId` it is a picture INSIDE the mail (the HTML shows it as
+/// `<img src="cid:…">`); without one it is an attachment beside it.
+public class MailAttachment {
+  public string FileName = "";
+  public byte[] Content = [];
+  /// The media type — "application/pdf". Empty lets the sender infer it from the name.
+  public string ContentType = "";
+  public string ContentId = "";
+}
+
+/// One mail message — the shape a SENT message is written in, and the shape a RECEIVED one will be read in (a later version),
+/// so a conversation is one kind of thing whichever direction each message went.
+///
+/// ⚑ THREADING IS FIRST-CLASS. `MessageId` is the message's own RFC 5322 id — the outbox mints one before it leaves, so
+///   the app knows it at once — and `InReplyTo` / `References` are the ids of what it answers. A reply that carries them
+///   lands in the reader's conversation; one that does not starts a new one.
+public class MailMessage {
+  /// The sender — "Acme <support@acme.com>". Empty: the app's `app.Mail.From`.
+  public string From = "";
+  /// Forget the message once it is SENT: the outbox keeps that a message went — when, through what, the carrier's id —
+  /// and nothing of who it went to or what it said. For a message whose copy must not outlive its delivery: the answer
+  /// to a person whose data was just erased (Osysharp.Privacy), which is written after the erasure ran. A message that
+  /// could not be sent keeps everything, so it can still be sent. (0.7.0)
+  public bool ForgetOnceSent = false;
+  public List<string> To = [];
+  public List<string> Cc = [];
+  public List<string> Bcc = [];
+  /// Where a reply goes, when that is not the sender.
+  public List<string> ReplyTo = [];
+  public string Subject = "";
+  /// The plain-text body. At least one of `Text` and `Html`.
+  public string? Text;
+  public string? Html;
+  public List<MailAttachment> Attachments = [];
+  /// Headers of the mail itself — `List-Unsubscribe` and the like. The threading headers are the fields below, not
+  /// entries here.
+  public Dictionary<string, string> Headers = new Dictionary<string, string>();
+  /// `<…@…>` — this message's id.
+  public string MessageId = "";
+  /// The id of the message this one answers, or "".
+  public string InReplyTo = "";
+  /// The ids of the conversation so far, oldest first.
+  public List<string> References = [];
+  /// For a delivery FAILURE report (a bounce, RFC 3464): the Message-IDs of the mails it says could not be delivered —
+  /// what a receiver reads from the report's own returned part (`message/rfc822`, or `text/rfc822-headers`), which is
+  /// the one place a bounce reliably names them; many carry no `In-Reply-To` at all. Empty on any other mail. Added
+  /// in 0.3.0 as a field with a default, so nothing written before it changes.
+  public List<string> FailedMessageIds = [];
+  /// When it was written, by its own `Date` header (UTC); null when it carries none. Added in 0.5.0, with a default.
+  public DateTime? Date = null;
+}
+
+// ── the sender ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Something that carries mail. Implement it for a provider, or for a mailbox the app sends AS, and name an instance in
+/// `app.Mail`: `app.Mail = new MailSetup { Sender = new ResendSender { ApiKey = Secret.ResendApiKey }, From = "…" };`
+public interface IMailSender {
+  /// Short and stable — "resend", "mailbox". Recorded on each message it sent.
+  string Key { get; }
+  /// Whether it can send right now — its credentials are set. A sender that is not ready leaves mail HELD.
+  bool IsReady();
+  /// Send one message. It carries its `MessageId` and threading headers already; send them as they are. Answer the
+  /// carrier's own id for it (what its support asks for). `idempotencyKey` is stable per message: a retried delivery
+  /// must send once. Throw `ExternalServiceException` on failure — the outbox retries.
+  string SendMail(MailMessage message, string idempotencyKey);
+  /// Why it is not ready, in a sentence the person reading the outbox can act on — it is written on each message the
+  /// sender leaves HELD. The default names the sender; a sender that knows WHICH setting is missing should say so.
+  ///
+  /// ⚑ A DEFAULT, added in 0.2.0: a member with a body is one an implementor may omit, so every sender written against
+  ///   0.1.0 compiles unchanged and says this. That is how a contract grows inside a major (D-CONTRACTS1).
+  string NotReadyReason() => $"The mail sender '{Key}' is not ready — its credentials are not set.";
+}
+
+// ── the mailbox (0.5.0, D-RECEIVE1) ──────────────────────────────────────────────────────────────────────────────
+
+/// A MAILBOX the app reads, and sends as — a Google Workspace / Gmail inbox, a Microsoft 365 one, or any IMAP account.
+/// The app is not a mail server: the mail arrives where it always did, and the app watches that inbox, the way a person
+/// does. Name one in `app.Mail.Mailboxes`; with `Osysharp.Mail.Receiving` the app asks it for new mail every minute and
+/// keeps what it hands over.
+///
+/// ⚑ ONE CONNECTED MAILBOX READS AND SENDS. A message whose `From` is this mailbox's address goes out THROUGH it — so a
+///   reply to a customer leaves from `support@acme.com`, threaded, and sits in that mailbox's Sent folder like any reply
+///   a person wrote there.
+///
+/// ⚑ GROWS BY DEFAULTED MEMBERS (D-CONTRACTS1): a member added later carries a body, so a mailbox written against this
+///   version keeps compiling.
+public interface IMailbox {
+  /// Short and stable — "gmail", "microsoft365", "imap". Recorded on what it received.
+  string Key { get; }
+  /// The address this mailbox IS — "support@acme.com".
+  string Address { get; }
+  /// Whether it can be read right now — its credentials are set.
+  bool IsReady();
+  /// Why it is not ready, in a sentence the person connecting it can act on.
+  string NotReadyReason() => $"The mailbox '{Address}' is not ready — its credentials are not set.";
+  /// The mail that arrived after `cursor`, oldest first, at most `max` of it, and the cursor to ask from next. An EMPTY
+  /// cursor means START NOW: answer no mail, only the cursor of this moment — a mailbox connected today does not
+  /// import its history. Throw `ExternalServiceException` when the provider cannot be reached; it is asked again.
+  MailboxPage Fetch(string cursor, int max);
+  /// Send one message AS this mailbox. It carries its Message-ID and threading headers already; send them as they are.
+  /// Answer the provider's own id for it. `idempotencyKey` is stable per message.
+  string SendMail(MailMessage message, string idempotencyKey);
+
+  // ── push (0.6.0, D-PUSHMAIL1) — every member DEFAULTED, so a mailbox written before it is simply polled ────────────
+
+  /// Whether this mailbox can TELL the app that mail arrived, rather than being asked. A mailbox that can is watched
+  /// by push with a slow safety-net poll; one that cannot is polled every `PollEvery()`.
+  bool CanPush() => false;
+
+  /// Ask the provider to notify `notifyUrl` when mail arrives — Gmail's `users.watch`, a Graph subscription. `secret`
+  /// is a fresh random value the provider echoes on every notification (Graph's `clientState`); a provider that
+  /// proves itself another way may ignore it. Answer what the provider set up, and until when.
+  /// Throw `ExternalServiceException` when the provider refuses — the watch says why and keeps polling.
+  MailboxSubscription Subscribe(string notifyUrl, string secret) {
+    throw new ValidationException($"The mailbox '{Address}' cannot push; it is polled.");
+  }
+
+  /// Keep a subscription alive past its expiry — by default, subscribe again (Gmail's `watch` is renewed that way).
+  MailboxSubscription Renew(MailboxSubscription current, string notifyUrl, string secret) => Subscribe(notifyUrl, secret);
+
+  /// Cancel a subscription — the mailbox is no longer watched. A provider that lets one simply lapse does nothing.
+  void Unsubscribe(MailboxSubscription current) { }
+
+  /// Read one PUSHED request (its body as it arrived) into what it says: which mailbox changed, or which subscription
+  /// needs attention. Verify the sender here — a request that does not prove itself throws, and is refused.
+  /// `notifyUrl` is the address the provider was told to call (an OIDC token's audience). A notice carries no mail.
+  List<MailboxNotice> ReadPush(string body, string notifyUrl) => [];
+
+  /// How often to ASK when nothing is pushed: every minute by default. The plan's minimum interval raises it (a free
+  /// app: every 15 minutes).
+  TimeSpan PollEvery() => TimeSpan.FromMinutes(1);
+
+  /// How often to ask anyway while pushes are arriving — the safety net that catches a notification the provider
+  /// dropped, so a mail is late at worst and never lost.
+  TimeSpan SafetyNetEvery() => TimeSpan.FromMinutes(30);
+
+  /// How an admin CONNECTS this mailbox from a page, when it is connected that way (D-PUSHMAIL1): the app's OAuth
+  /// client to consent with and the app secret the grant is kept in — what the page hands to
+  /// `Security.OAuthConnectUrl(client, secret, returnTo, address)`. Empty `Client`: it is not connected from a page
+  /// (an IMAP app password, an app registration's client secret).
+  MailboxConnection Connection() => new MailboxConnection();
+}
+
+/// How a mailbox is connected from a page — see `IMailbox.Connection()`. `Connected`: its grant is already there.
+public class MailboxConnection {
+  public string Client = "";
+  public string Secret = "";
+  public bool Connected = false;
+}
+
+/// What `IMailbox.Subscribe` set up with the provider: its id for the subscription, and when it lapses.
+public class MailboxSubscription {
+  public string Id = "";
+  public DateTime ExpiresAt = DateTime.MinValue;
+}
+
+/// What a pushed request said. `Address`: this mailbox changed (Gmail). `Subscription`: this subscription has news
+/// (Graph) — `ClientState` is the secret it echoed, and `Lifecycle` is set when the news is about the subscription
+/// itself ("reauthorizationRequired", "subscriptionRemoved", "missed") rather than about mail.
+public class MailboxNotice {
+  public string Address = "";
+  public string Subscription = "";
+  public string ClientState = "";
+  public string Lifecycle = "";
+}
+
+/// What one `IMailbox.Fetch` answered.
+public class MailboxPage {
+  public List<MailboxItem> Items = [];
+  /// Where to ask from next time — opaque to everything but the mailbox that wrote it.
+  public string Cursor = "";
+  /// Something the watch should SAY although the poll succeeded — "history older than a week is gone; watching resumes
+  /// from now". Written on the watch for an admin to read; "" when there is nothing to say.
+  public string Notice = "";
+}
+
+/// One message as the mailbox holds it: the provider's own id for it, and the whole message, exactly as it arrived
+/// (RFC 5322 — what `Mime.Parse` reads, and what is kept as the original).
+public class MailboxItem {
+  public string ProviderId = "";
+  public byte[] Raw = [];
+}
+
+/// What the app does with each mail a watched mailbox received — `app.Mail.Receiver`. Watching is
+/// `Osysharp.Mail.Receiving`'s: it keeps each mail, then hands it here once, after the commit that kept it, in a unit of
+/// work of its own; a throw undoes what this did and it is tried again a few minutes later, for a day.
+/// `Osysharp.Conversations.Mail` ships one that files each mail into its conversation.
+public interface IMailReceiver {
+  void Received(MailMessage mail, MailReceipt receipt);
+}
+
+/// Where a received mail came from, as plain data — the mailbox, the provider's id, and the kept original (the
+/// `FileAsset` id of the whole message as it arrived, readable exactly where its received-mail row is).
+public class MailReceipt {
+  public string Mailbox = "";
+  public string ProviderId = "";
+  public Guid OriginalId = Guid.Empty;
+}
+
+/// How the app's mail goes out — `app.Mail = new MailSetup { … }`.
+[AppSetting("Mail")]
+public class MailSetup {
+  /// The mailboxes the app reads — and sends from: a message `From` one of these goes out through it rather than
+  /// through `Sender`. Each one is READ once `Osysharp.Mail.Receiving`'s `WatchMailbox(address)` has been called for it.
+  public List<IMailbox> Mailboxes = [];
+  /// What each received mail is handed to. None: received mail is KEPT, unhandled, until there is one.
+  public IMailReceiver? Receiver = null;
+  /// What carries it. None: every message is HELD in the outbox — the app works, and nothing is sent.
+  public IMailSender? Sender = null;
+  /// The default sender, for a message that names none — "Acme <noreply@acme.com>", on a domain the sender may send
+  /// from.
+  public string From = "";
+  /// Where replies go by default, when that is not `From`.
+  public string ReplyTo = "";
+  /// The path of the app's PUSH endpoint (D-PUSHMAIL1) — where a mailbox that can push is told to send its
+  /// notifications, with the provider's key appended (`/api/rest/v1/mail-push` → `…/mail-push/gmail`). Empty: nothing
+  /// pushes, and every watched mailbox is polled. See `Osysharp.Mail.Receiving`'s `MailboxPushed` for the endpoint.
+  public string PushPath = "";
+}
+
+// ── helpers every mail kit uses ──────────────────────────────────────────────────────────────────────────────────────
+
+/// The mailbox in `app.Mail.Mailboxes` with this address, or null.
+public IMailbox? MailboxAt(string address) {
+  var a = address.Trim().ToLower();
+  return App.Setting<MailSetup>().Mailboxes.FirstOrDefault(m => m.Address.Trim().ToLower() == a);
+}
+
+/// A received message's bytes as a `MailMessage` — the whole of what `Mime.Parse` reads, in the contract's own shape.
+public MailMessage ParseMail(byte[] raw) {
+  return JsonSerializer.Deserialize<MailMessage>(Mime.Parse(raw));
+}
+
+/// A `MailMessage` as the RFC 5322 bytes a mailbox sends.
+public byte[] RawOf(MailMessage message) {
+  return Mime.Build(JsonSerializer.Serialize(message));
+}
+
+/// "Ada <ada@example.com>" → "ada@example.com".
+public string AddressPart(string mailbox) {
+  var open = mailbox.LastIndexOf("<");
+  var close = mailbox.LastIndexOf(">");
+  var address = open >= 0 && close > open ? mailbox.Substring(open + 1, close - open - 1) : mailbox;
+  return address.Trim().ToLower();
+}
+
