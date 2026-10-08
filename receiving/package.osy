@@ -1,0 +1,31 @@
+// Osysharp.Mail.Receiving — the app WATCHES one or more mailboxes (D-RECEIVE1): it is never a mail server. The mail
+// arrives where it always did — a Google Workspace or Microsoft 365 inbox, any IMAP account. A mailbox that can PUSH tells
+// the app the moment mail lands (and is asked every half hour anyway); one that cannot is polled. Each message is kept
+// once with its whole original and handed to `app.Mail.Receiver` after the commit that kept it.
+//
+// ⚑ A PACKAGE OF ITS OWN, so an app that only SENDS mail (every app with sign-in, through Osysharp.Accounts) carries
+//   none of these tables. The mailboxes themselves — `IMailbox`, implemented by Osysharp.Mail.Gmail /
+//   Osysharp.Mail.Microsoft365 / Osysharp.Mail.Imap — are Osysharp.Mail's, because one connected mailbox also SENDS.
+//
+// ⚑ RECEIVED MAIL IS CUSTOMER DATA. Nobody reads it unless the app grants it:
+//     partial entity ReceivedMail { security { allow read when IsAgent; } }
+//     partial entity MailboxWatch { security { allow read, create when IsAdmin; } }
+//
+// ⚑ THE MAILBOXES PAGE IS THE KIT'S (0.3.0): Settings → Channels → Mailboxes, announced to the app's settings area, for
+//   whoever `ManagesMailboxes` — the app's own `IsAdmin` unless it says otherwise (`policy ManagesMailboxes => IsLead;`).
+package Osysharp.Mail.Receiving {
+  version     "0.4.1";
+  minPlatform "0.9.0";
+  summary     "watched mailboxes — new mail pushed (Gmail via Pub/Sub, Microsoft 365 via Graph) with a half-hourly safety net, or polled; each message kept once with its original, handed to the app's receiver after the commit, retried, failed with its reason, erasable by sender; and the settings page for whoever manages them.";
+  model "model/*.osy";
+  // The personal data its own fields hold (`[Classification(Personal.X)]`): an app maps a level onto its own
+  // classification, or leaves it to each row's own security.
+  personal Contact;
+  personal Content;
+  use Osysharp.Mail@0;
+  use Osysharp.Workflow;
+  use Osysharp.Storage;
+  use Osysharp.Ui;
+  use Osysharp.Oauth;
+  tests "tests";
+}

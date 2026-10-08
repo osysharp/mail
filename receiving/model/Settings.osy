@@ -1,0 +1,202 @@
+// THE MAILBOXES PAGE — the app's settings area, Channels → Mailboxes (owner 2026-10-02; it was Harbour's own page,
+// D-PUSHMAIL1). For each mailbox in `app.Mail`: whether it is watched, whether its mail is PUSHED or polled and why, when
+// it was last asked and last pushed, and what is wrong if anything is; "Connect" for an inbox connected with the
+// provider's own consent, and start/stop watching. Below it, the mail the app could not take in, each sent through
+// again with one press.
+//
+// ⚑ WHO MANAGES MAILBOXES IS THE APP'S TO SAY — and by default its admins: `ManagesMailboxes` answers with the app's
+//   `IsAdmin` unless the app defines it (`policy ManagesMailboxes => IsLead;`). Connecting an inbox writes the credential
+//   the app reads its customers' mail with, so the page and every function behind it ask it.
+//
+// ⚑ ANNOUNCED, NEVER WIRED (D-SETTINGSREG1): the page lists itself in the settings area through `ISettingsProvider`. An
+//   app takes it over by declaring a component of the same name (`MailboxSettings`).
+namespace Osysharp.Mail.Receiving;
+
+using Osysharp.Mail;
+using Osysharp.Ui;
+
+/// Who manages the app's mailboxes: sees how each one is read, starts and stops watching it, connects it with the
+/// provider's consent, and sends a mail the app could not take in through again. Defaults to the app's admins — the
+/// app's own `IsAdmin` — and an app that means somebody else defines it: `policy ManagesMailboxes => IsLead;`.
+virtual policy ManagesMailboxes => IsAdmin;
+
+/// One mailbox as the page shows it — its configuration, and its watch.
+public class MailboxView {
+  public string Address = "";
+  public string Provider = "";
+  public bool Watched = false;
+  public string State = "";
+  public string Delivery = "";
+  public string LastAsked = "";
+  public string LastPush = "";
+  public int Received = 0;
+  public string Problem = "";
+  public string PushProblem = "";
+  public bool CanConnect = false;
+  public bool Connected = false;
+}
+
+/// Every mailbox in `app.Mail`, as the page shows it.
+[Authorize(ManagesMailboxes)]
+public List<MailboxView> MailboxViews() {
+  List<MailboxView> views = [];
+  foreach (var box in App.Setting<MailSetup>().Mailboxes) {
+    var a = box.Address.Trim().ToLower();
+    var w = MailboxWatch.FirstOrDefault(x => x.Address == a);
+    var c = box.Connection();
+    var v = new MailboxView { Address = box.Address, Provider = ProviderName(box.Key), CanConnect = c.Client != "", Connected = c.Connected };
+    if (w == null) {
+      v.State = "Not watched";
+      v.Delivery = box.CanPush() ? "Pushed once watched" : "Polled once watched";
+    } else {
+      v.Watched = w.State != MailboxWatchState.Stopped;
+      v.State = w.State.Label;
+      v.Delivery = w.PushId != null && w.PushExpiresAt != null && w.PushExpiresAt > DateTime.UtcNow
+        ? "Pushed — subscription renewed before " + w.PushExpiresAt!.Value.ToString("d MMM HH:mm") + " UTC; asked every half hour as a safety net"
+        : "Polled";
+      v.LastAsked = w.LastPolledAt == null ? "never" : w.LastPolledAt!.Value.ToString("d MMM HH:mm") + " UTC";
+      v.LastPush = w.LastPushAt == null ? "" : w.LastPushAt!.Value.ToString("d MMM HH:mm") + " UTC (" + w.Pushes.ToString() + " in all)";
+      v.Received = w.Received;
+      v.Problem = w.Problem;
+      v.PushProblem = w.PushProblem;
+    }
+    views.Add(v);
+  }
+  return views;
+}
+
+/// The provider's consent page for connecting `address` — the inbox's own owner signs in there; the grant is kept in
+/// the app secret the mailbox names, and the manager comes back to the mailboxes page.
+[Authorize(ManagesMailboxes)]
+public string MailboxConnectUrl(string address) {
+  var box = MailboxAt(address);
+  if (box == null) { throw new ValidationException($"'{address}' is not one of this app's mailboxes."); }
+  var c = box.Connection();
+  if (c.Client == "") { throw new ValidationException($"'{address}' is not connected from here — its credentials are set where it is configured."); }
+  return Security.OAuthConnectUrl(c.Client, c.Secret, "/settings/mailboxes", box.Address);
+}
+
+/// Start watching `address` — what the page's "Start watching" does.
+[Authorize(ManagesMailboxes)]
+public void StartWatchingMailbox(string address) {
+  WatchMailbox(address);
+}
+
+/// Stop watching `address`, when it is watched — what the page's "Stop watching" does.
+[Authorize(ManagesMailboxes)]
+public void StopWatchingMailboxAt(string address) {
+  var a = address.Trim().ToLower();
+  var w = MailboxWatch.FirstOrDefault(x => x.Address == a);
+  if (w != null && w.State != MailboxWatchState.Stopped) { StopWatchingMailbox(w); }
+}
+
+/// Hand a mail the app could not take in to its receiver again — what the page's "Send through again" does.
+[Authorize(ManagesMailboxes)]
+public void SendMailThroughAgain(ReceivedMail mail) {
+  RetryReceivedMail(mail);
+}
+
+/// A provider's key as a person reads it.
+string ProviderName(string key) {
+  if (key == "gmail") { return "Google Workspace"; }
+  if (key == "microsoft365") { return "Microsoft 365"; }
+  if (key == "imap") { return "IMAP"; }
+  return key == "" ? "" : key.Substring(0, 1).ToUpper() + key.Substring(1);
+}
+
+/// The mailboxes' part of the app's settings area: "Mailboxes", under Channels, for whoever manages them.
+public class MailboxSettingsSections : ISettingsProvider {
+  public SettingsLink[] Sections() {
+    return [
+      new SettingsLink { Label = "Mailboxes", To = "/settings/mailboxes", Group = "Channels", Icon = Icons.Inbox, Order = 30,
+                         Shown = ManagesMailboxes, Hint = "The inboxes people write to: connected, pushed or polled, and what is wrong." },
+    ];
+  }
+}
+
+/// The mailboxes, as a settings page.
+[Page("/settings/mailboxes")] [Layout(SettingsFrame)] [Authorize(ManagesMailboxes)] [Render(CSR)] [Title("Mailboxes")]
+public component MailboxSettings() {
+  List<MailboxView> boxes = [];
+  live var failed = ReceivedMail.Where(r => r.Status == ReceivedMailStatus.Failed).OrderBy(r => r.Attempts).ToList();
+  string problem = "";
+  // The provider's consent sends the manager back here, saying how it went in the fragment.
+  live var connected = Navigation.Hash.Contains("oauth_connected=");
+  live var connectError = Text.Split(Navigation.Hash, "oauth_connect_error=").Count > 1
+    ? Uri.UnescapeDataString(Text.Split(Navigation.Hash, "oauth_connect_error=")[1])
+    : "";
+
+  on mount { boxes = MailboxViews(); }
+
+  action Connect(MailboxView m) {
+    problem = "";
+    try { Navigation.Open(MailboxConnectUrl(m.Address), sameTab: true); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action Watch(MailboxView m) {
+    problem = "";
+    try { StartWatchingMailbox(m.Address); boxes = MailboxViews(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action Stop(MailboxView m) {
+    problem = "";
+    try { StopWatchingMailboxAt(m.Address); boxes = MailboxViews(); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action Retry(ReceivedMail mail) {
+    problem = "";
+    try { SendMailThroughAgain(mail); }
+    catch (Exception ex) { problem = ex.Message; }
+  }
+  action Refresh() { boxes = MailboxViews(); }
+
+  render {
+    SettingsPage("Mailboxes", description: "The inboxes people write to. Mail arriving in a watched inbox comes into the app — pushed the moment it lands where the provider can push, and the inbox is asked every half hour as well, so nothing is missed.") {
+      if (connected) { Alert("Connected. The inbox is read with that account from now on.", tone: Tone.Success); }
+      if (connectError != "") { Alert(connectError, title: "The inbox was not connected", tone: Tone.Danger); }
+      if (problem != "") { Alert(problem, tone: Tone.Danger); }
+      SettingsSection("Inboxes") {
+        Stack(gap: 0, role: UiRole.List, label: "Inboxes") {
+          if (boxes.Count == 0) { Text("No mailboxes are configured.", color: Colors.TextMuted, fontSize: FontSize.Caption); }
+          foreach (var m in boxes) {
+            Stack(gap: 1, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: m.Address) {
+              Row(gap: 3, align: Align.Center, wrap: Wrapping.Wrap) {
+                Stack(gap: 0, grow: 1, minW: "0") {
+                  Text(m.Address, fontWeight: FontWeight.Medium);
+                  Text(m.Provider + " · " + m.State + " · " + m.Delivery, fontSize: FontSize.Caption, color: Colors.TextMuted);
+                }
+                if (m.CanConnect) {
+                  Button(m.Connected ? "Connect again" : "Connect", onPress: () => Connect(m), tone: m.Connected ? Tone.Ghost : Tone.Primary, size: Size.Sm);
+                }
+                if (m.Watched) { Button("Stop watching", onPress: () => Stop(m), tone: Tone.Ghost, size: Size.Sm); }
+                else { Button("Start watching", onPress: () => Watch(m), tone: Tone.Primary, size: Size.Sm); }
+              }
+              if (m.LastAsked != "") {
+                Text("Last asked " + m.LastAsked + (m.LastPush == "" ? "" : " · last pushed " + m.LastPush) + " · " + m.Received.ToString() + " mails received",
+                     fontSize: FontSize.Caption, color: Colors.TextMuted);
+              }
+              if (m.CanConnect && !m.Connected) { Text("Not connected yet: press Connect and sign in as " + m.Address + ".", fontSize: FontSize.Caption, color: Colors.TextMuted); }
+              if (m.Problem != "") { Alert(m.Problem, title: "Reading this inbox", tone: Tone.Warning); }
+              if (m.PushProblem != "") { Alert(m.PushProblem, title: "Push", tone: Tone.Warning); }
+            }
+          }
+        }
+        Row { Button("Refresh", onPress: Refresh, tone: Tone.Ghost, size: Size.Sm); }
+      }
+      SettingsSection("Mail the app could not take in", description: "Mail that was kept but could not be handed on — tried again, backing off, for a day. Fix what stopped it, then send it through again.") {
+        Stack(gap: 0, role: UiRole.List, label: "Mail the app could not take in") {
+          if (failed.Count == 0) { Text("Nothing is waiting.", color: Colors.TextMuted, fontSize: FontSize.Caption); }
+          foreach (var f in failed) {
+            Row(gap: 3, align: Align.Center, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: f.Subject) {
+              Stack(gap: 0, grow: 1, minW: "0") {
+                Text(f.Subject, fontWeight: FontWeight.Medium);
+                Text(f.From + " · " + f.Problem, fontSize: FontSize.Caption, color: Colors.TextMuted);
+              }
+              Button("Send through again", onPress: () => Retry(f), tone: Tone.Ghost, size: Size.Sm);
+            }
+          }
+        }
+      }
+    }
+  }
+}

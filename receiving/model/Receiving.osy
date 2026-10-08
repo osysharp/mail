@@ -1,0 +1,533 @@
+namespace Osysharp.Mail.Receiving;
+
+using Osysharp.Mail;
+using Osysharp.Storage;
+using Osysharp.Workflow;
+
+// Osysharp.Mail.Receiving (D-RECEIVE1, D-PUSHMAIL1) — the app watches one or more MAILBOXES; it is never a mail server.
+//
+//   app.Mail = new MailSetup {
+//     Mailboxes = [new GmailMailbox { Address = "support@acme.com", ClientId = "…", ClientSecret = Secret.GoogleSecret,
+//                                     RefreshToken = Secret.SupportMailbox, PushTopic = "projects/acme/topics/mail",
+//                                     PushServiceAccount = "mail-push@acme.iam.gserviceaccount.com" }],
+//     Receiver  = new IntoConversations(),
+//     PushPath  = "/api/rest/v1/mail-push",          // the app's push door — see `MailboxPushed`
+//   };
+//   WatchMailbox("support@acme.com");   // once — an admin's "Connect", or the app's setup
+//
+// ⚑ PUSH FIRST, A POLL AS THE SAFETY NET (D-PUSHMAIL1). A mailbox that can push (Gmail through Cloud Pub/Sub, Microsoft
+//   365 through Graph change notifications) is subscribed when it is watched, and RENEWED before it lapses — by this
+//   kit's own durable workflow, so a restart or a deploy loses nothing. A notification carries no mail: it WAKES the
+//   mailbox's fetch from where the last one stopped, and a burst of them is one fetch. Every half hour the mailbox is
+//   asked anyway, so a notification the provider dropped makes a mail late, never lost. A mailbox that cannot push
+//   (IMAP), or whose push is not working, is polled at its own interval — no more often than the app's plan allows.
+//
+// ⚑ THREE STEPS, EACH DURABLE, AND THE ORDER IS THE GUARANTEE:
+//   1. `MailboxPolling` asks the mailbox for what arrived since its cursor — when woken, and on its interval.
+//   2. Each message is KEPT — a `ReceivedMail` row with the whole original as a file — before anything acts on it. The
+//      provider's id is unique per mailbox and the Message-ID across them, so a message seen twice (a retried poll, a
+//      mail sent to two monitored addresses, a push and the safety net) is one message.
+//   3. `ReceivedMailHandling` hands it to `app.Mail.Receiver` in a unit of work of its own, after the commit that kept
+//      it; a throw undoes what the receiver did and it is tried again, backing off, for a day, then marked Failed with
+//      the reason, where staff can see it and send it through again (`RetryReceivedMail`).
+//
+// ⚑ RECEIVED MAIL IS CUSTOMER DATA. Nobody reads these rows unless the app grants it — `partial entity ReceivedMail {
+//   security { allow read when IsAgent; } }` — and `EraseMailFrom(address)` forgets what came from a person, original and
+//   all, for the right to erasure.
+
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum MailboxWatchState {
+  [Label("Watching")] Watching,
+  [Label("Stopped")] Stopped,
+  /// A push said mail arrived; the fetch runs in a moment, and every further push before then is the same fetch.
+  [Label("Fetching")] Woken,
+}
+
+// ⚠ Appended, never inserted.
+public enum ReceivedMailStatus {
+  /// Kept, and waiting for the receiver.
+  [Label("Received")] Accepted,
+  /// The receiver took it.
+  [Label("Handled")] Handled,
+  /// The receiver threw on it for a day. Kept, with the reason; `RetryReceivedMail` sends it through again.
+  [Label("Failed")] Failed,
+}
+
+/// A mailbox the app is watching — one row per address, made by `WatchMailbox`. Its poll writes where it got to.
+[Authority(Extensible)]
+public entity MailboxWatch {
+  /// The mailbox's address — the `Address` of one of `app.Mail.Mailboxes`.
+  [Required, Unique, MaxLength(320)] string Address;
+  MailboxWatchState State;                      // no default — MailboxPolling owns it
+  /// Where the last poll got to — the mailbox's own cursor, opaque to everything else.
+  [MaxLength(2000)] string Cursor = "";
+  DateTime? LastPolledAt;
+  /// Why the last poll could not read the mailbox ("" when it could) — what an admin reads to fix it.
+  [MaxLength(500)] string Problem = "";
+  /// How many messages this mailbox has handed over.
+  int Received = 0;
+  /// The provider's id for this mailbox's push subscription (a Graph subscription id; the address, for Gmail), or null
+  /// while nothing pushes. A Graph notification finds its watch by it.
+  [Unique, MaxLength(300)] string? PushId;
+  /// When the push subscription lapses unless renewed — the renewal comes well before.
+  DateTime? PushExpiresAt;
+  /// When the current push subscription was made or last renewed.
+  DateTime? PushRenewedAt;
+  /// The secret the provider echoes on each notification (Graph's `clientState`) — how a notification proves it is
+  /// about OUR subscription. Never shown.
+  [MaxLength(100)] string PushSecret = "";
+  /// Why this mailbox is not pushing ("" when it is, or cannot) — what an admin reads to fix it. It is still polled.
+  [MaxLength(500)] string PushProblem = "";
+  /// The last notification that woke it, and how many have.
+  DateTime? LastPushAt;
+  int Pushes = 0;
+  /// A notification said the subscription itself needs attention (Graph: reauthorization, removal) — renewed on the
+  /// next fetch rather than inside the provider's three-second answer window.
+  bool PushRenewDue = false;
+
+  // The app grants who may watch and read — `partial entity MailboxWatch { security { allow read, create when IsAdmin; } }`.
+  // What no grant can change: a watch is FOR one mailbox; where its poll got to, and its push subscription, are the
+  // workflow's alone; and the secret a provider echoes is never read by anyone.
+  security {
+    deny update Address;
+    deny update Cursor;
+    deny update Received;
+    deny update PushId;
+    deny update PushExpiresAt;
+    deny update PushRenewedAt;
+    deny update PushSecret;
+    deny read PushSecret;
+    deny update Pushes;
+  }
+}
+
+/// A message a watched mailbox received — KEPT before anything acts on it, with the whole original.
+[Authority(Extensible)]
+[Unique(Mailbox, ProviderId)]
+public entity ReceivedMail {
+  /// The mailbox it arrived in.
+  [Required, MaxLength(320)] string Mailbox;
+  /// The provider's own id for it, unique within its mailbox.
+  [Required, MaxLength(300)] string ProviderId;
+  /// Its RFC 5322 Message-ID — `<…@…>` — or "" when it carried none.
+  [MaxLength(300)] string MessageId = "";
+  /// Its sender's address, lower-cased — what erasure finds it by.
+  [Classification(Personal.Contact), MaxLength(320)] string From = "";
+  [Classification(Personal.Content), MaxLength(300)] string Subject = "";
+  /// The whole message as it arrived. An attachment of this row: readable exactly where the row is.
+  [Attachment] FileAsset? Original;
+  ReceivedMailStatus Status;                    // no default — ReceivedMailHandling owns it
+  int Attempts = 0;
+  /// Why the receiver could not take it, the last time it tried ("" when it did).
+  [MaxLength(1000)] string Problem = "";
+
+  // The app grants who may read received mail — `partial entity ReceivedMail { security { allow read when IsAgent; } }`
+  // — and nobody else does: it is customer data. What no grant can change: it is the RECORD of what arrived — which
+  // mailbox, from whom, the original itself — so nobody rewrites it; only erasure (the system) removes it.
+  security {
+    deny create when !IsAuthenticator && IsAuthenticated;
+    deny update Mailbox;
+    deny update ProviderId;
+    deny update MessageId;
+    deny update From;
+    deny update Original;
+  }
+}
+
+/// Watch a mailbox — from now on, what arrives in it is kept and handed over. The address must be one of
+/// `app.Mail.Mailboxes`; watching one twice is watching it once. Answers the watch.
+public MailboxWatch WatchMailbox(string address) {
+  var a = address.Trim().ToLower();
+  if (!App.Setting<MailSetup>().Mailboxes.Any(m => m.Address.Trim().ToLower() == a)) {
+    throw new ValidationException($"'{address}' is not one of this app's mailboxes. Add it to `app.Mail.Mailboxes` first.");
+  }
+  var existing = MailboxWatch.FirstOrDefault(w => w.Address == a);
+  if (existing != null) { return existing; }
+  return new MailboxWatch { Address = a };
+}
+
+/// Stop watching a mailbox. What it already handed over is kept; its push subscription is cancelled.
+public void StopWatchingMailbox(MailboxWatch watch) {
+  MailboxPolling.RaiseStop(watch);
+}
+
+/// Watches one mailbox: subscribes it to push where it can, renews that before it lapses, fetches whenever a push wakes
+/// it — and asks it anyway on an interval: the safety net while pushes arrive, the only way in while they do not.
+///
+/// ⚑ EVERY OUTBOUND CALL IS ON A CLOCK, NOT IN `enter` OR IN A PUSH'S ARM — the watch row is written in somebody's
+///   commit (an autostarted run's `enter` is part of it, D-AUTOSTART1), and a push is answered within the provider's
+///   few seconds. So a push only moves the run to `Woken`; the fetch, and any renewal it asked for, run on that
+///   state's clock a moment later.
+public workflow MailboxPolling {
+  Tracks    = MailboxWatch.State;
+  Autostart = true;
+  Initial   = Watching;
+
+  event Stop();
+  /// A pushing mailbox's provider said it changed (Gmail, through Pub/Sub) — found by its address.
+  [CorrelateOn(this.Item.Address == address)]
+  event Pushed(string address);
+  /// A Graph subscription said its mailbox changed, or that the subscription needs attention — found by its id.
+  [CorrelateOn(this.Item.PushId == subscription)]
+  event Notified(string subscription, string clientState, string lifecycle);
+
+  state Watching {
+    subscribe Stop() as Stopping {
+      Finished {
+        Within = TimeSpan.FromDays(36500);
+        // The first ask is due at once (it sets the cursor of "now"); after that, on the mailbox's interval — computed,
+        // so the plan's minimum holds at run time — and not again merely because a push came and went.
+        // ⚑ The first ask also SUBSCRIBES (when it can): its interval is computed after its body runs, so it must
+        //   already know whether push is live — or the gap after it would be the polling interval, not the safety net.
+        Remind Poll(After = FirstPollAfter(this.Item), ThenEvery = PollEveryFor(this.Item)) {
+          if (this.Item.LastPolledAt == null) { KeepPushAlive(this.Item); }
+          PollUntilCaughtUp(this.Item);
+        }
+        // Subscribe at once, then check twice a day: a subscription past half its life is renewed (Graph's ~3 days,
+        // Gmail's 7), and one that failed is tried again.
+        Remind Renew(After = TimeSpan.Zero, ThenEvery = TimeSpan.FromHours(12)) { KeepPushAlive(this.Item); }
+        Unfinished { }
+      }
+    }
+    subscribe Pushed() as PushedWhileWatching;
+    subscribe Notified() as NotifiedWhileWatching;
+    on Stopping() { EndPush(this.Item); goto Stopped; }
+    on PushedWhileWatching(string address) { NotePush(this.Item); goto Woken; }
+    on NotifiedWhileWatching(string subscription, string clientState, string lifecycle) {
+      if (TakeNotice(this.Item, clientState, lifecycle)) { goto Woken; }
+    }
+  }
+
+  /// Woken by a push: fetch in a few seconds. Every push until then is the SAME fetch — a burst of twenty mails is one
+  /// conversation with the provider, not twenty.
+  state Woken {
+    Expire { Within = TimeSpan.FromSeconds(5); Accrues = false; }
+    subscribe Stop() as StoppingWoken;
+    subscribe Pushed() as PushedWhileWoken;
+    subscribe Notified() as NotifiedWhileWoken;
+    on Expire {
+      if (this.Item.PushRenewDue) { KeepPushAlive(this.Item); }
+      PollUntilCaughtUp(this.Item);
+      goto Watching;
+    }
+    on StoppingWoken() { EndPush(this.Item); goto Stopped; }
+    on PushedWhileWoken(string address) { NotePush(this.Item); }
+    on NotifiedWhileWoken(string subscription, string clientState, string lifecycle) { TakeNotice(this.Item, clientState, lifecycle); }
+  }
+  terminal cancel Stopped { }
+}
+
+/// The first ask is due at once; a run that re-enters `Watching` after a push-woken fetch waits its interval instead.
+TimeSpan FirstPollAfter(MailboxWatch watch) {
+  return watch.LastPolledAt == null ? TimeSpan.Zero : PollEveryFor(watch);
+}
+
+/// How often to ask: the safety net while this mailbox's push is live, its own polling interval while it is not.
+/// The plan's minimum interval raises either at run time (Osyrin: free apps no more often than every 15 minutes).
+TimeSpan PollEveryFor(MailboxWatch watch) {
+  var box = MailboxAt(watch.Address);
+  if (box == null) { return TimeSpan.FromMinutes(30); }
+  return PushIsLive(watch) ? box.SafetyNetEvery() : box.PollEvery();
+}
+
+/// Whether this mailbox's push subscription is in force right now.
+bool PushIsLive(MailboxWatch watch) {
+  return watch.PushId != null && watch.PushExpiresAt != null && watch.PushExpiresAt > DateTime.UtcNow;
+}
+
+/// Where this app's push endpoint is, for a mailbox of this provider — "" when the app has none.
+string NotifyUrlFor(IMailbox box) {
+  var path = App.Setting<MailSetup>().PushPath.Trim().TrimEnd('/');
+  if (path == "") { return ""; }
+  return App.BaseUrl + (path.StartsWith("/") ? path : "/" + path) + "/" + box.Key;
+}
+
+/// Subscribe a mailbox that can push, renew a subscription past half its life, and say why when neither can be done.
+/// Any failure leaves the mailbox POLLED at its own interval — it is never left unwatched.
+void KeepPushAlive(MailboxWatch watch) {
+  // A provider that ASKED for a renewal (Graph's reauthorizationRequired) gets one now, whatever its age.
+  var asked = watch.PushRenewDue;
+  watch.PushRenewDue = false;
+  var box = MailboxAt(watch.Address);
+  if (box == null || !box.CanPush()) { watch.PushProblem = ""; return; }
+  if (!box.IsReady()) { watch.PushProblem = box.NotReadyReason(); return; }
+  var url = NotifyUrlFor(box);
+  if (url == "") {
+    watch.PushProblem = "This mailbox can push, but the app has no push endpoint — set `PushPath` in app.Mail and publish "
+      + "`MailboxPushed` there. Until then it is polled.";
+    return;
+  }
+  var now = DateTime.UtcNow;
+  if (!asked && PushIsLive(watch) && watch.PushRenewedAt != null) {
+    var halfLife = (watch.PushExpiresAt!.Value - watch.PushRenewedAt!.Value).TotalMinutes / 2;
+    if (now < watch.PushRenewedAt!.Value.AddMinutes(halfLife)) { return; }   // not due yet
+  }
+  try {
+    // A RENEWAL keeps the secret the subscription was made with — Graph renews by PATCHing the expiry and goes on
+    // echoing the original `clientState`, so a fresh secret here would make every later notification look forged.
+    var secret = PushIsLive(watch) && watch.PushSecret != "" ? watch.PushSecret : Security.RandomHex(32);
+    MailboxSubscription made;
+    if (PushIsLive(watch)) {
+      made = box.Renew(new MailboxSubscription { Id = watch.PushId!, ExpiresAt = watch.PushExpiresAt!.Value }, url, secret);
+    } else {
+      made = box.Subscribe(url, secret);
+    }
+    watch.PushId = made.Id;
+    watch.PushExpiresAt = made.ExpiresAt;
+    watch.PushRenewedAt = now;
+    watch.PushSecret = secret;
+    watch.PushProblem = "";
+    Log.Information("Mailbox {Address}: push subscription {Subscription} in force until {Expires}", watch.Address, made.Id, made.ExpiresAt);
+  } catch (ExternalServiceException e) {
+    watch.PushProblem = Clip($"The provider would not set up push: {e.Message} It is polled until it does.", 500);
+    Log.Warning("Mailbox {Address}: push could not be set up — {Problem}", watch.Address, e.Message);
+  } catch (ValidationException e) {
+    watch.PushProblem = Clip(e.Message, 500);
+    Log.Warning("Mailbox {Address}: push could not be set up — {Problem}", watch.Address, e.Message);
+  }
+}
+
+/// Cancel the push subscription of a watch that is stopping — best effort: a lapsed one costs nothing.
+void EndPush(MailboxWatch watch) {
+  var box = MailboxAt(watch.Address);
+  if (box != null && watch.PushId != null && box.CanPush()) {
+    try {
+      box.Unsubscribe(new MailboxSubscription { Id = watch.PushId!, ExpiresAt = watch.PushExpiresAt ?? DateTime.UtcNow });
+    } catch (ExternalServiceException e) {
+      Log.Warning("Mailbox {Address}: its push subscription could not be cancelled ({Problem}); it lapses on its own", watch.Address, e.Message);
+    }
+  }
+  watch.PushId = null;
+  watch.PushExpiresAt = null;
+}
+
+/// A push arrived for this watch.
+void NotePush(MailboxWatch watch) {
+  watch.LastPushAt = DateTime.UtcNow;
+  watch.Pushes = watch.Pushes + 1;
+}
+
+/// A Graph notification: answers whether it should wake a fetch. One that does not echo this watch's secret is not
+/// ours to act on — it is logged and dropped. One about the subscription itself asks for a renewal on the next fetch.
+bool TakeNotice(MailboxWatch watch, string clientState, string lifecycle) {
+  if (watch.PushSecret == "" || !Crypto.FixedTimeEquals(clientState, watch.PushSecret)) {
+    Log.Warning("Mailbox {Address}: a notification for its subscription did not carry its secret — ignored", watch.Address);
+    return false;
+  }
+  NotePush(watch);
+  if (lifecycle == "reauthorizationRequired" || lifecycle == "subscriptionRemoved") {
+    if (lifecycle == "subscriptionRemoved") { watch.PushId = null; watch.PushExpiresAt = null; }
+    watch.PushRenewDue = true;
+  }
+  // A change, a `missed`, a removal — each means "look", and looking is cheap.
+  return true;
+}
+
+/// THE APP'S PUSH DOOR — publish it in `app.Apis` at `app.Mail.PushPath` (a package opens no routes):
+///
+///   new RestApi("MailPush") { Route = "mail-push", Auth = new ApiAuth { Anonymous = true },
+///     Endpoints = [ new Endpoint(MailboxPushed) { Method = HttpMethod.Post, Path = "/{provider}", Raw = true,
+///       Query = ["validationToken"], ContentType = "text/plain", OidcIssuer = "https://accounts.google.com" } ] }
+///
+/// Open at the transport and proven in the body: each provider's mailbox verifies its own requests (`ReadPush` — Gmail
+/// checks Pub/Sub's signed token, which the PLATFORM verified; Graph's notifications echo a per-subscription secret,
+/// checked by the watch's own run). It answers Graph's validation handshake with its token, and anything else with "".
+/// A notification carries no mail and is not trusted for any: it only wakes the watch to look.
+[SuppressWarning("cost-clause-calls-the-server-per-element")]   // an endpoint body: it runs on the server whole, and CanPush() reads no table
+public string MailboxPushed(string provider) {
+  var validation = Request.Query("validationToken");
+  if (validation != null) { return validation; }
+  var body = Request.RawBody ?? "";
+  var setup = App.Setting<MailSetup>();
+  // Several mailboxes of one provider each read the same request; a notice is acted on once.
+  var seen = new List<string>();
+  foreach (var box in setup.Mailboxes.Where(m => m.Key == provider && m.CanPush()).ToList()) {
+    foreach (var notice in box.ReadPush(body, NotifyUrlFor(box))) {
+      var key = notice.Address + "|" + notice.Subscription + "|" + notice.Lifecycle;
+      if (seen.Contains(key)) { continue; }
+      seen.Add(key);
+      if (notice.Address != "") {
+        var found = MailboxPolling.CorrelatePushed(notice.Address.Trim().ToLower());
+        if (found != CorrelationOutcome.Deposited) {
+          Log.Information("A push for {Address} woke no watch ({Outcome})", notice.Address, found);
+        }
+      }
+      if (notice.Subscription != "") {
+        var found = MailboxPolling.CorrelateNotified(notice.Subscription, notice.ClientState, notice.Lifecycle);
+        if (found != CorrelationOutcome.Deposited) {
+          Log.Information("A notification for subscription {Subscription} woke no watch ({Outcome})", notice.Subscription, found);
+        }
+      }
+    }
+  }
+  return "";
+}
+
+/// Fetch until the mailbox has nothing more right now — a page at a time, at most eight pages a turn (a backlog
+/// larger than that is taken on the next turn, which a push or the safety net brings).
+void PollUntilCaughtUp(MailboxWatch watch) {
+  var pages = 0;
+  while (pages < 8 && PollMailbox(watch)) { pages = pages + 1; }
+}
+
+/// One poll: what arrived since the watch's cursor, each message kept once. A mailbox that cannot be read leaves the
+/// cursor where it was and says why on the watch; the next poll tries again. Answers whether a FULL page came back —
+/// there may be more.
+public bool PollMailbox(MailboxWatch watch) {
+  var box = MailboxAt(watch.Address);
+  watch.LastPolledAt = DateTime.UtcNow;
+  if (box == null) {
+    watch.Problem = $"No mailbox in app.Mail.Mailboxes has the address '{watch.Address}'.";
+    return false;
+  }
+  if (!box.IsReady()) {
+    watch.Problem = box.NotReadyReason();
+    return false;
+  }
+  MailboxPage page;
+  try {
+    page = box.Fetch(watch.Cursor, 25);
+  } catch (ExternalServiceException e) {
+    watch.Problem = Clip($"The mailbox could not be read: {e.Message}", 500);
+    Log.Warning("Mailbox {Address} could not be read: {Problem}", watch.Address, e.Message);
+    return false;
+  }
+  foreach (var item in page.Items) {
+    if (Keep(watch, box, item)) { watch.Received = watch.Received + 1; }
+  }
+  var moved = page.Cursor != watch.Cursor;
+  watch.Cursor = page.Cursor;
+  watch.Problem = page.Notice;
+  return moved && page.Items.Count >= 25;
+}
+
+/// `text`, cut to fit a column of `max` characters.
+string Clip(string text, int max) {
+  return text.Length > max ? text.Substring(0, max) : text;
+}
+
+/// Keep one message — once. Answers whether it was new.
+bool Keep(MailboxWatch watch, IMailbox box, MailboxItem item) {
+  if (item.ProviderId == "" || item.Raw.Length == 0) { return false; }
+  if (ReceivedMail.Any(r => r.Mailbox == watch.Address && r.ProviderId == item.ProviderId)) { return false; }
+  var messageId = "";
+  var from = "";
+  var subject = "";
+  try {
+    var mail = ParseMail(item.Raw);
+    messageId = mail.MessageId;
+    from = AddressPart(mail.From);
+    subject = mail.Subject;
+  } catch (Exception e) {
+    // A message the parser cannot read is still KEPT — the original is the record — and the receiver is told why.
+    subject = "(could not be read)";
+  }
+  // The same message in a second watched mailbox (a mail to support@ AND billing@) is the same message.
+  if (messageId != "" && ReceivedMail.Any(r => r.MessageId == messageId)) { return false; }
+  var original = File.Create(OriginalName(messageId, item.ProviderId), "message/rfc822", item.Raw);
+  new ReceivedMail {
+    Mailbox = watch.Address, ProviderId = item.ProviderId, MessageId = messageId,
+    From = from, Subject = subject.Length > 300 ? subject.Substring(0, 300) : subject, Original = original,
+  };
+  return true;
+}
+
+/// Hands each kept message to `app.Mail.Receiver`, after the commit that kept it.
+public workflow ReceivedMailHandling {
+  Tracks    = ReceivedMail.Status;
+  Autostart = true;
+  Initial   = Accepted;
+
+  /// The receiver took it.
+  event Took();
+  /// Staff send a failed mail through again.
+  event Retry();
+
+  state Accepted {
+    subscribe Took() as Taken {
+      Finished {
+        Within = TimeSpan.FromDays(1);
+        Remind Hand(After = TimeSpan.Zero, ThenEvery = HandBackoff(this.Item)) {
+          if (HandReceived(this.Item)) { ReceivedMailHandling.RaiseTook(this.Item); }
+        }
+        Unfinished { goto Failed; }
+      }
+    }
+    on Taken() { goto Handled; }
+  }
+  terminal success Handled { }
+  /// Not terminal: staff can send a failed mail through again once whatever stopped it is fixed.
+  state Failed {
+    on Retry() { goto Accepted; }
+  }
+}
+
+/// How long to wait before handing a mail over again: five minutes after the first refusal, doubling, at most two hours —
+/// for the day the hand-off is given. Computed, so the plan's minimum interval holds at run time.
+TimeSpan HandBackoff(ReceivedMail row) {
+  var minutes = 5;
+  var n = 1;
+  while (n < row.Attempts && minutes < 120) { minutes = minutes * 2; n = n + 1; }
+  return TimeSpan.FromMinutes(minutes > 120 ? 120 : minutes);
+}
+
+/// Send a mail the receiver gave up on through again — after whatever stopped it is fixed.
+public void RetryReceivedMail(ReceivedMail mail) {
+  if (mail.Status != ReceivedMailStatus.Failed) {
+    throw new ValidationException("Only a mail that failed can be sent through again.");
+  }
+  ReceivedMailHandling.RaiseRetry(mail);
+}
+
+/// One try. A throw from the receiver undoes everything it staged — the conversation it started, the ticket it opened —
+/// and leaves the reason on the row; the next try starts clean.
+bool HandReceived(ReceivedMail row) {
+  var receiver = App.Setting<MailSetup>().Receiver;
+  if (receiver == null) {
+    row.Problem = "No receiver is set up — name one in app.Mail (`Receiver = …`). The mail is kept until there is one.";
+    return false;
+  }
+  if (row.Original == null) {
+    row.Problem = "The original of this mail is gone (erased), so there is nothing to hand over.";
+    return false;
+  }
+  row.Attempts = row.Attempts + 1;
+  var mark = UnitOfWork.Mark("receive");
+  try {
+    receiver.Received(ParseMail(File.ReadAllBytes(row.Original)),
+                      new MailReceipt { Mailbox = row.Mailbox, ProviderId = row.ProviderId, OriginalId = row.Original!.Id });
+  } catch (Exception e) {
+    UnitOfWork.RollbackTo(mark);
+    row.Problem = e.Message.Length > 1000 ? e.Message.Substring(0, 1000) : e.Message;
+    return false;
+  }
+  row.Problem = "";
+  return true;
+}
+
+/// Forget what was received FROM `address` — a person exercising their right to erasure: each message's row and its
+/// original. Answers how many.
+///
+/// ⚑ CALL IT FROM A WORKFLOW, which runs as the system — the way `Osysharp.Conversations`' erasure does. The originals
+///   belong to no person (the mailbox handed them over), so nobody's own grants could delete them; erasure is the
+///   system's job, and the app decides who may ASK for it.
+[SuppressWarning("cost-unbounded-read")]   // one person's received mail — an erasure reaches every one
+public int EraseMailFrom(string address) {
+  var a = address.Trim().ToLower();
+  if (a == "") { return 0; }
+  var reached = 0;
+  foreach (var r in ReceivedMail.Where(r => r.From == a).ToList()) {
+    var original = r.Original;
+    r.Delete();
+    if (original != null) { original.Delete(); }
+    reached = reached + 1;
+  }
+  return reached;
+}
+
+/// The original's file name — the Message-ID's local part when there is one, the provider's id otherwise.
+string OriginalName(string messageId, string providerId) {
+  var basis = messageId != "" ? messageId.Replace("<", "").Replace(">", "") : providerId;
+  var safe = Regex.Replace(basis, "[^A-Za-z0-9._@-]", "_");
+  return (safe.Length > 120 ? safe.Substring(0, 120) : safe) + ".eml";
+}

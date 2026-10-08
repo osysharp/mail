@@ -1,0 +1,13 @@
+// The producer's test project for Osysharp.Mail.Receiving — a watched mailbox the tests fill (a fake provider at the
+// `IMailbox` seam, so nothing leaves the process) and a receiver that records what it was handed.
+app MailReceivingKitTests {
+  model "model/**/*.osy";
+  tests "**/*.test.osy";
+  use Osysharp.Identity@0;
+  use Osysharp.Mail@0;
+  use Osysharp.Mail.Receiving@0;
+  use Osysharp.Workflow;
+  // The tests read a received mail's original back (`File.ReadAllBytes(asset)`).
+  use Osysharp.Storage;
+}
+

@@ -1,0 +1,92 @@
+{
+  "platform": {
+    "version": "0.9.0"
+  },
+  "entries": [
+    {
+      "name": "Osysharp.Identity",
+      "kind": "package",
+      "version": "0.7.0",
+      "hash": "sha256:a8f780ee024fb27a6c1f909feb86fec10c8a176788acd8546d1380a9243575bd",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/identity",
+      "constraint": "0"
+    },
+    {
+      "name": "Osysharp.Mail",
+      "kind": "package",
+      "version": "0.9.0",
+      "hash": "sha256:9d881411b8948aae3c06adeb2ebe9cd828d198e07bef0d5c002c83206ca6e013",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/mail",
+      "constraint": "0"
+    },
+    {
+      "name": "Osysharp.Workflow",
+      "kind": "package",
+      "version": "1.0.0",
+      "hash": "sha256:c9b5bb60a8be44efc0030d73b0bd60bdab05926344a68fb4db29dc78ee94c2f8",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Workflow"
+    },
+    {
+      "name": "Osysharp.Mail.Receiving",
+      "kind": "package",
+      "version": "0.4.1",
+      "hash": "sha256:5ae187bb43a3b31f0c505e999397d7bd4d1b359c63f95c397d1b7045b2795ca2",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:kits/mail-receiving",
+      "constraint": "0"
+    },
+    {
+      "name": "Osysharp.Storage",
+      "kind": "package",
+      "version": "1.2.0",
+      "hash": "sha256:0e45268f33acd5a0fe1dae3e886ab1d828824fc628f9a34efa81af746b0f57d0",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Storage"
+    },
+    {
+      "name": "Osysharp.Ui",
+      "kind": "package",
+      "version": "2.17.1",
+      "hash": "sha256:17d6d844ed71d4d614d43a6993723da70b2d39241c31e9f9fb58250a5183263c",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Ui"
+    },
+    {
+      "name": "Osysharp.Oauth",
+      "kind": "package",
+      "version": "1.0.0",
+      "hash": "sha256:fd5563824db859a8f313637ed6a74f7bcf232b1c18df6f60ea6fd0cd2cad8f1c",
+      "minPlatform": "0.9.0",
+      "shadow": "app-forkable",
+      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Oauth"
+    }
+  ],
+  "bridges": {
+    "searched": [
+      "workspace",
+      "platform"
+    ],
+    "skipped": [
+      "github: offline \u2014 the public catalog was not searched for bridges. Run \u0060osy lock\u0060 with a network to look."
+    ],
+    "notIncluded": [
+      {
+        "name": "Osysharp.Conversations.Mail",
+        "reason": "completes Osysharp.Conversations \u002B Osysharp.Mail.Receiving, and this app does not use \u0060Osysharp.Conversations\u0060."
+      },
+      {
+        "name": "Osysharp.Privacy.MailReceiving",
+        "reason": "completes Osysharp.Privacy \u002B Osysharp.Mail.Receiving, and this app does not use \u0060Osysharp.Privacy\u0060."
+      }
+    ]
+  }
+}

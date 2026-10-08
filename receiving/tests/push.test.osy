@@ -1,0 +1,156 @@
+// Osysharp.Mail.Receiving — PUSH FIRST (D-PUSHMAIL1). The fake mailbox can push when a test says so: a watched mailbox
+// is subscribed through the app's push door, a push WAKES a fetch from the cursor (a burst of them is one fetch), the
+// subscription is renewed before it lapses, a half-hourly poll still catches what no push announced, and a mailbox
+// whose push cannot be set up is polled — never left unwatched. Every push arrives over the app's real route.
+
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using MailReceivingKitTests;
+
+[TestFixture]
+void Pushing() {
+  var ada = new Person { Email = "ada@acme.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  new ProviderState { Pushes = true };
+}
+
+/// The provider's push: "this mailbox changed" — as the fake provider's `ReadPush` reads it.
+int PushAddress(string address) {
+  return Api.Post("/api/rest/v1/mail-push/fake", "{\"Address\":\"" + address + "\"}").StatusCode;
+}
+
+/// A Graph-shaped notification for a subscription, echoing `clientState`.
+int Notify(string subscription, string clientState, string lifecycle = "") {
+  return Api.Post("/api/rest/v1/mail-push/fake",
+    "{\"Subscription\":\"" + subscription + "\",\"ClientState\":\"" + clientState + "\",\"Lifecycle\":\"" + lifecycle + "\"}").StatusCode;
+}
+
+MailboxWatch Help() { return MailboxWatch.Single(w => w.Address == "help@acme.test"); }
+
+[Test(Pushing)]
+void a_watched_mailbox_that_can_push_is_subscribed_through_the_apps_push_door() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    var sub = PushSubscription.Single();
+    Assert.True(sub.NotifyUrl.EndsWith("/api/rest/v1/mail-push/fake"));
+    Assert.Equal(sub.SubscriptionId, Help().PushId);
+    Assert.Equal("", Help().PushProblem);
+  }
+}
+
+[Test(Pushing)]
+void a_push_wakes_a_fetch_from_the_cursor_and_a_burst_of_pushes_is_one_fetch() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Arrive(1, Plain("<one@example.test>", "Export broken", "Row 3."));
+    Arrive(2, Plain("<two@example.test>", "Still broken", "Row 4."));
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    var before = ProviderState.Single().Fetches;
+    Assert.Equal(200, PushAddress("help@acme.test"));
+    Assert.Equal(200, PushAddress("help@acme.test"));
+    Assert.Equal(200, PushAddress("help@acme.test"));
+    Assert.Equal(MailboxWatchState.Woken, Help().State);
+    Assert.Equal(before, ProviderState.Single().Fetches);   // a push carries no mail and fetches nothing by itself
+    TestClock.Advance(TimeSpan.FromSeconds(5));
+    NextPoll();
+    Assert.Equal(before + 1, ProviderState.Single().Fetches);
+    Assert.Equal(3, Help().Pushes);
+    Assert.Equal(MailboxWatchState.Watching, Help().State);
+  }
+  runas (Ada) {
+    Assert.True(ReceivedMail.Any(r => r.MessageId == "<one@example.test>"));
+    Assert.True(ReceivedMail.Any(r => r.MessageId == "<two@example.test>"));
+    Assert.Equal(1, Handled.Count(h => h.MessageId == "<two@example.test>"));
+  }
+}
+
+[Test(Pushing)]
+void while_push_is_live_the_mailbox_is_still_asked_every_half_hour_so_a_dropped_push_loses_nothing() {
+  runas (Ada) { Watch(); }
+  runas (Ada) { Arrive(1, Plain("<dropped@example.test>", "Nobody pushed this", "…")); UnitOfWork.Commit(); }
+  runas (Ada) {
+    TestClock.Advance(TimeSpan.FromMinutes(1));
+    NextPoll();
+    // Push is live: no minute-by-minute asking.
+    Assert.False(ReceivedMail.Any(r => r.MessageId == "<dropped@example.test>"));
+    TestClock.Advance(TimeSpan.FromMinutes(30));
+    NextPoll();
+  }
+  runas (Ada) { Assert.True(ReceivedMail.Any(r => r.MessageId == "<dropped@example.test>")); }
+}
+
+[Test(Pushing)]
+void a_mailbox_whose_push_cannot_be_set_up_says_why_and_is_polled_meanwhile() {
+  runas (Ada) { ProviderState.Single().RefusesSubscription = true; UnitOfWork.Commit(); }
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Assert.Contains("refused the subscription", Help().PushProblem);
+    Assert.True(Help().PushId == null);
+    Arrive(1, Plain("<polled@example.test>", "Polled", "…"));
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) { Assert.True(ReceivedMail.Any(r => r.MessageId == "<polled@example.test>")); }
+}
+
+[Test(Pushing)]
+void the_subscription_is_renewed_before_it_lapses() {
+  runas (Ada) { ProviderState.Single().SubscriptionHours = 24; UnitOfWork.Commit(); }
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    var first = Help().PushExpiresAt!.Value;
+    TestClock.Advance(TimeSpan.FromHours(12));
+    Workflow.Settle(Help());
+    Assert.Equal(1, PushSubscription.Count(s => s.Renewal));
+    Assert.True(Help().PushExpiresAt!.Value > first);
+  }
+}
+
+[Test(Pushing)]
+void a_notification_that_does_not_echo_its_subscriptions_secret_wakes_nothing() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    var sub = PushSubscription.Single();
+    Assert.Equal(200, Notify(sub.SubscriptionId, "not-the-secret"));
+    Assert.Equal(MailboxWatchState.Watching, Help().State);
+    Assert.Equal(0, Help().Pushes);
+    Assert.Equal(200, Notify(sub.SubscriptionId, sub.ClientState));
+    Assert.Equal(MailboxWatchState.Woken, Help().State);
+  }
+}
+
+[Test(Pushing)]
+void a_subscription_the_provider_asks_to_reauthorize_is_renewed_on_the_next_fetch() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    var sub = PushSubscription.Single();
+    Assert.Equal(200, Notify(sub.SubscriptionId, sub.ClientState, "reauthorizationRequired"));
+    TestClock.Advance(TimeSpan.FromSeconds(5));
+    Workflow.Settle(Help());
+    Assert.Equal(1, PushSubscription.Count(s => s.Renewal));
+  }
+}
+
+[Test(Pushing)]
+void the_push_door_answers_a_validation_handshake_with_its_token_as_plain_text() {
+  var r = Api.Post("/api/rest/v1/mail-push/fake?validationToken=" + Uri.EscapeDataString("Validation: reachability 42"), "");
+  Assert.Equal(200, r.StatusCode);
+  Assert.Equal("Validation: reachability 42", r.Body);
+}
+
+[Test(Pushing)]
+void stopping_a_watch_cancels_its_subscription() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    StopWatchingMailbox(Help());
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    Assert.True(PushSubscription.Single().Cancelled);
+    Assert.Equal(MailboxWatchState.Stopped, Help().State);
+    Assert.True(Help().PushId == null);
+  }
+}

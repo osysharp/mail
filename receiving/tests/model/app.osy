@@ -1,0 +1,174 @@
+// A desk that watches one mailbox — the smallest correct consumer of Osysharp.Mail.Receiving.
+namespace MailReceivingKitTests;
+
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Storage;
+using Osysharp.Workflow;
+
+[Role] enum AppRole { Authenticator, Agent, Customer }
+
+policy IsAgent => RoleGrant.Any(g => g.Member == user && g.Role == AppRole.Agent);
+// Who manages the mailboxes (Osysharp.Mail.Receiving's page) — this app has no admins, so its agent staff.
+policy ManagesMailboxes => IsAgent;
+
+entity Person : Principal {
+  security {
+    allow read when IsAuthenticated || IsAuthenticator;
+    allow create when IsAuthenticator;
+    allow update when IsAuthenticated || IsAuthenticator where Id == user.Id;
+    allow update when IsAuthenticator;
+  }
+}
+
+// The app grants its agents the received mail and the watch — nothing else reads them.
+partial entity MailboxWatch { security { allow create, read when IsAgent; } }
+partial entity ReceivedMail { security { allow read when IsAgent; } }
+
+/// What the fake provider holds — one row per message "in the mailbox", in arrival order.
+entity Inbound {
+  [Required] int Seq;
+  [Required, MaxLength(300)] string ProviderId;
+  [Required] byte[] Raw;
+  security { allow read, create when IsAuthenticated || IsAuthenticator; }
+}
+
+/// What the fake provider was asked to SEND — a mail from the mailbox's own address goes out through it.
+entity SentFromMailbox {
+  [Required, MaxLength(300)] string Subject;
+  [Required, MaxLength(255)] string MessageId;
+  [Required] byte[] Raw;
+  security { allow read when IsAuthenticated; }
+}
+
+/// A switch the tests flip: the provider cannot be reached, or the receiver throws — and, for push: whether the
+/// mailbox can push at all, whether the provider refuses a subscription, and how long one lasts.
+entity ProviderState {
+  bool Down = false;
+  bool ReceiverThrows = false;
+  bool Pushes = false;
+  bool RefusesSubscription = false;
+  int SubscriptionHours = 72;
+  /// How many times `Fetch` was asked — a burst of pushes must be ONE fetch.
+  int Fetches = 0;
+  security { allow read, create, update when IsAuthenticated || IsAuthenticator || IsAnonymous; }
+}
+
+/// What the fake provider set up when asked to push — one row per subscribe or renew, the way Graph keeps them: its
+/// id, where it notifies, the secret it will echo, and until when.
+entity PushSubscription {
+  [Required, MaxLength(100)] string SubscriptionId;
+  [Required, MaxLength(500)] string NotifyUrl;
+  [Required, MaxLength(100)] string ClientState;
+  DateTime ExpiresAt;
+  bool Renewal = false;
+  bool Cancelled = false;
+  security { allow read, create, update when IsAuthenticated || IsAuthenticator || IsAnonymous; }
+}
+
+/// A mailbox the tests fill: `Fetch` hands over every `Inbound` row after the cursor (the last sequence number seen).
+public class FakeMailbox : IMailbox {
+  public string Key { get; } = "fake";
+  public string Address { get; set; } = "";
+  public bool IsReady() { return Address != ""; }
+  public bool CanPush() { return ProviderState.Any(s => s.Pushes); }
+  public MailboxSubscription Subscribe(string notifyUrl, string secret) {
+    var state = ProviderState.Single();
+    if (state.RefusesSubscription) { throw new ExternalServiceException("The provider refused the subscription (403)."); }
+    var id = "sub-" + (PushSubscription.Count() + 1).ToString();
+    var expires = DateTime.UtcNow.AddHours(state.SubscriptionHours);
+    new PushSubscription { SubscriptionId = id, NotifyUrl = notifyUrl, ClientState = secret, ExpiresAt = expires };
+    return new MailboxSubscription { Id = id, ExpiresAt = expires };
+  }
+  public MailboxSubscription Renew(MailboxSubscription current, string notifyUrl, string secret) {
+    var expires = DateTime.UtcNow.AddHours(ProviderState.Single().SubscriptionHours);
+    new PushSubscription { SubscriptionId = current.Id, NotifyUrl = notifyUrl, ClientState = secret, ExpiresAt = expires, Renewal = true };
+    return new MailboxSubscription { Id = current.Id, ExpiresAt = expires };
+  }
+  public void Unsubscribe(MailboxSubscription current) {
+    foreach (var s in PushSubscription.Where(p => p.SubscriptionId == current.Id).ToList()) { s.Cancelled = true; }
+  }
+  /// The fake provider's push: `{"address": "…"}` (a Gmail-shaped "this mailbox changed") or `{"subscription": "…",
+  /// "clientState": "…", "lifecycle": "…"}` (a Graph-shaped notification).
+  public List<MailboxNotice> ReadPush(string body, string notifyUrl) {
+    var notice = JsonSerializer.Deserialize<MailboxNotice>(body);
+    if (notice.Address != "" && notice.Address != Address) { return []; }
+    return [notice];
+  }
+  public MailboxPage Fetch(string cursor, int max) {
+    if (ProviderState.Any(s => s.Down)) { throw new ExternalServiceException("The provider did not answer."); }
+    ProviderState.Single().Fetches = ProviderState.Single().Fetches + 1;
+    // An empty cursor is "start now": nothing from before, only where the mailbox is.
+    if (cursor == "") {
+      var newest = Inbound.Any() ? Inbound.Max(i => i.Seq) : 0;
+      return new MailboxPage { Cursor = newest.ToString() };
+    }
+    var after = int.Parse(cursor);
+    var page = new MailboxPage { Cursor = cursor };
+    foreach (var i in Inbound.Where(i => i.Seq > after).OrderBy(i => i.Seq).Take(max).ToList()) {
+      page.Items.Add(new MailboxItem { ProviderId = i.ProviderId, Raw = i.Raw });
+      page.Cursor = i.Seq.ToString();
+    }
+    return page;
+  }
+  public string SendMail(MailMessage message, string idempotencyKey) {
+    new SentFromMailbox { Subject = message.Subject, MessageId = message.MessageId, Raw = RawOf(message) };
+    return "fake-" + idempotencyKey;
+  }
+}
+
+/// What the receiver was handed — one row per mail.
+entity Handled {
+  [Required, MaxLength(300)] string Subject;
+  [MaxLength(320)] string From = "";
+  [MaxLength(300)] string MessageId = "";
+  [MaxLength(300)] string InReplyTo = "";
+  string Text = "";
+  int Files = 0;
+  security { allow read when IsAuthenticated; }
+}
+
+/// A receiver that records what it was handed — and, when the switch says so, writes a row and then throws, so a test
+/// can see that the half-done work is undone.
+public class RecordingReceiver : IMailReceiver {
+  public void Received(MailMessage mail, MailReceipt receipt) {
+    new Handled { Subject = mail.Subject, From = mail.From, MessageId = mail.MessageId, InReplyTo = mail.InReplyTo,
+                  Text = mail.Text ?? "", Files = mail.Attachments.Count };
+    if (ProviderState.Any(s => s.ReceiverThrows)) { throw new ValidationException("The desk is closed."); }
+  }
+}
+
+/// A message arrives in the fake mailbox.
+void Arrive(int seq, string raw) {
+  new Inbound { Seq = seq, ProviderId = "p-" + seq.ToString(), Raw = Encoding.UTF8.GetBytes(raw) };
+}
+
+/// An erasure request — what an app's own erasure flow looks like: a row, and a workflow that does the work as the
+/// system, because the originals belong to nobody whose grants could delete them.
+entity EraseRequest {
+  [Required, MaxLength(320)] string Address;
+  EraseState State;
+  int Reached = 0;
+  /// A file the test asks about afterwards — read by the workflow, as the system, which sees every file there is.
+  Guid Watch;
+  bool WatchedFileLeft = true;
+  security { allow read, create when IsAgent; }
+}
+
+enum EraseState { Asked, Done }
+
+workflow Erasing {
+  Tracks    = EraseRequest.State;
+  Autostart = true;
+  Initial   = Asked;
+  state Asked {
+    Expire { Within = TimeSpan.Zero; Accrues = false; }
+    on Expire {
+      this.Item.Reached = EraseMailFrom(this.Item.Address);
+      this.Item.WatchedFileLeft = FileAsset.Any(f => f.Id == this.Item.Watch);
+      goto Done;
+    }
+  }
+  terminal success Done { }
+}

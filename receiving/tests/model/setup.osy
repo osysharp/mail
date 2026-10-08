@@ -1,0 +1,27 @@
+// The app's mail setup, in a file of its own with no `namespace` (an `app.X = …` value resolves outside it).
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using MailReceivingKitTests;
+
+app.Mail = new MailSetup {
+  From = "Acme Help <help@acme.test>",
+  // A mailbox the app WATCHES — a fake provider the tests fill (`Inbound` rows), so nothing leaves the process.
+  Mailboxes = [new FakeMailbox { Address = "help@acme.test" }],
+  Receiver = new RecordingReceiver(),
+  // Where a mailbox that can push is told to notify — the endpoint below (the fake pushes only when a test says so).
+  PushPath = "/api/rest/v1/mail-push",
+};
+
+// The app's push door, published where `PushPath` says — exactly as a real app publishes it.
+app.Apis = [
+  new RestApi("MailPush") {
+    Route = "mail-push",
+    Auth  = new ApiAuth { Anonymous = true },
+    Endpoints = [
+      new Endpoint(MailboxPushed) {
+        Method = HttpMethod.Post, Path = "/{provider}", Raw = true,
+        Query = ["validationToken"], ContentType = "text/plain", OidcIssuer = "https://accounts.google.com",
+      },
+    ],
+  },
+];

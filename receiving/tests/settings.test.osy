@@ -1,0 +1,74 @@
+// The mailboxes page (owner 2026-10-02): the kit announces it to whoever `ManagesMailboxes` (this test app: its agents),
+// shows each mailbox and how its mail arrives, starts and stops watching one — and refuses everybody else, on the page's
+// functions as well as in the settings area.
+
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using MailReceivingKitTests;
+
+[TestFixture]
+void Managed() {
+  var ada = new Person { Email = "ada@acme.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  new Person { Email = "cus@example.test", DisplayName = "Cus" };
+  new ProviderState();
+}
+
+principal Manager => Person.Single(p => p.Email == "ada@acme.test");
+principal Customer => Person.Single(p => p.Email == "cus@example.test");
+
+[Test(Managed)]
+[runas(Manager)]
+void the_kit_announces_the_mailboxes_page_to_whoever_manages_them() {
+  var link = AnnouncedSettings().Single(l => l.To == "/settings/mailboxes");
+  Assert.Equal("Mailboxes", link.Label);
+  Assert.Equal("Channels", link.Group);
+}
+
+[Test(Managed)]
+[runas(Customer)]
+void nobody_else_is_shown_it() {
+  Assert.False(AnnouncedSettings().Any(l => l.To == "/settings/mailboxes"));
+}
+
+[Test(Managed)]
+void a_manager_sees_each_mailbox_starts_watching_it_and_stops() {
+  runas (Manager) {
+    var before = MailboxViews().Single(v => v.Address == "help@acme.test");
+    Assert.Equal("Not watched", before.State);
+    Assert.Equal("Polled once watched", before.Delivery);
+    Assert.False(before.CanConnect);
+    StartWatchingMailbox("help@acme.test");
+    UnitOfWork.Commit();
+    Workflow.Settle(MailboxWatch.Single(w => w.Address == "help@acme.test"));
+  }
+  runas (Manager) {
+    var after = MailboxViews().Single(v => v.Address == "help@acme.test");
+    Assert.Equal("Watching", after.State);
+    Assert.True(after.Watched);
+    StopWatchingMailboxAt("help@acme.test");
+    UnitOfWork.Commit();
+  }
+  runas (Manager) { Assert.Equal("Stopped", MailboxViews().Single(v => v.Address == "help@acme.test").State); }
+}
+
+[Test(Managed)]
+void a_mailbox_not_connected_from_a_page_says_so() {
+  runas (Manager) {
+    var refused = Assert.Throws<ValidationException>(() => MailboxConnectUrl("help@acme.test"));
+    Assert.Contains("is not connected from here", refused.Message);
+    var unknown = Assert.Throws<ValidationException>(() => MailboxConnectUrl("nobody@acme.test"));
+    Assert.Contains("is not one of this app's mailboxes", unknown.Message);
+  }
+}
+
+[Test(Managed)]
+void somebody_who_does_not_manage_mailboxes_can_neither_read_nor_watch_one() {
+  runas (Customer) {
+    Assert.Throws(() => MailboxViews());
+    Assert.Throws(() => MailboxConnectUrl("help@acme.test"));
+    Assert.Throws(() => { StartWatchingMailbox("help@acme.test"); UnitOfWork.Commit(); });
+  }
+  runas (Manager) { Assert.False(MailboxWatch.Any()); }
+}

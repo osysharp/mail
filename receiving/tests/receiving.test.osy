@@ -1,0 +1,304 @@
+// Osysharp.Mail.Receiving — A watched mailbox (the tests' `FakeMailbox`, filled with `Inbound` rows) is polled;
+// each message is kept once, with its original, and handed to `app.Mail.Receiver` after the commit that kept it. Every
+// test asserts what was KEPT or what the RECEIVER was handed, never merely that a poll returned.
+
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Storage;
+using MailReceivingKitTests;
+
+[TestFixture]
+void Inbox() {
+  var ada = new Person { Email = "ada@acme.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  new Person { Email = "cus@example.test", DisplayName = "Cus" };
+  new ProviderState();
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@acme.test");
+principal Cus => Person.Single(p => p.Email == "cus@example.test");
+
+string Plain(string messageId, string subject, string body) {
+  return "From: Cus Tomer <cus@example.test>\nTo: help@acme.test\nSubject: " + subject + "\nMessage-ID: " + messageId
+    + "\nDate: Thu, 01 Oct 2026 09:30:00 +0200\nMIME-Version: 1.0\nContent-Type: text/plain; charset=utf-8\n\n" + body + "\n";
+}
+
+/// Watch the mailbox, and let its first poll run — the cursor of "now". Called as an agent.
+void Watch() {
+  var w = WatchMailbox("help@acme.test");
+  UnitOfWork.Commit();
+  Workflow.Settle(w);
+}
+
+/// The next poll (the test has moved the clock), and the handing of whatever it kept. Called as an agent.
+[SuppressWarning("cost-unbounded-read")]   // a test helper settling its own few received mails
+void NextPoll() {
+  Workflow.Settle(MailboxWatch.Single(x => x.Address == "help@acme.test"));
+  foreach (var r in ReceivedMail.ToList()) { Workflow.Settle(r); }
+}
+
+[Test(Inbox)]
+void a_mailbox_watched_today_starts_now_and_keeps_what_arrives_after() {
+  runas (Ada) { Arrive(1, Plain("<old@example.test>", "Last week", "Old news.")); UnitOfWork.Commit(); }
+  runas (Ada) { Watch(); }
+  runas (Ada) { Arrive(2, Plain("<new@example.test>", "The export is broken", "It fails on row 3.")); UnitOfWork.Commit(); }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) {
+    Assert.False(ReceivedMail.Any(r => r.MessageId == "<old@example.test>"));
+    var kept = ReceivedMail.Single(r => r.MessageId == "<new@example.test>");
+    Assert.Equal("help@acme.test", kept.Mailbox);
+    Assert.Equal("cus@example.test", kept.From);
+    Assert.Equal("The export is broken", kept.Subject);
+    Assert.True(kept.Original != null);
+    Assert.Equal(ReceivedMailStatus.Handled, kept.Status);
+    var handed = Handled.Single(h => h.MessageId == "<new@example.test>");
+    Assert.Equal("Cus Tomer <cus@example.test>", handed.From);
+    Assert.Contains("It fails on row 3.", handed.Text);
+    Assert.Equal(1, MailboxWatch.Single(x => x.Address == "help@acme.test").Received);
+  }
+}
+
+[Test(Inbox)]
+void the_same_message_seen_twice_is_one_message() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Arrive(1, Plain("<once@example.test>", "Hello", "Hi."));
+    // The same mail again under another provider id — a second watched address, or a provider that re-lists it.
+    Arrive(2, Plain("<once@example.test>", "Hello", "Hi."));
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) {
+    Assert.Equal(1, ReceivedMail.Count(r => r.MessageId == "<once@example.test>"));
+    Assert.Equal(1, Handled.Count(h => h.MessageId == "<once@example.test>"));
+  }
+}
+
+[Test(Inbox)]
+void a_receiver_that_throws_has_its_work_undone_and_is_tried_again() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    ProviderState.Single().ReceiverThrows = true;
+    Arrive(1, Plain("<retry@example.test>", "Later", "…"));
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) {
+    var kept = ReceivedMail.Single(r => r.MessageId == "<retry@example.test>");
+    Assert.Equal(ReceivedMailStatus.Accepted, kept.Status);
+    Assert.Equal("The desk is closed.", kept.Problem);
+    // The receiver wrote a row and then threw: the row is gone with the throw.
+    Assert.False(Handled.Any(h => h.MessageId == "<retry@example.test>"));
+    ProviderState.Single().ReceiverThrows = false;
+    UnitOfWork.Commit();
+  }
+  runas (Ada) {
+    TestClock.Advance(TimeSpan.FromMinutes(5));
+    Workflow.Settle(ReceivedMail.Single(r => r.MessageId == "<retry@example.test>"));
+  }
+  runas (Ada) {
+    var kept = ReceivedMail.Single(r => r.MessageId == "<retry@example.test>");
+    Assert.Equal(ReceivedMailStatus.Handled, kept.Status);
+    Assert.Equal("", kept.Problem);
+    Assert.Equal(1, Handled.Count(h => h.MessageId == "<retry@example.test>"));
+  }
+}
+
+[Test(Inbox)]
+void a_mail_the_receiver_gives_up_on_is_failed_with_its_reason_and_can_be_sent_through_again() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    ProviderState.Single().ReceiverThrows = true;
+    Arrive(1, Plain("<dead@example.test>", "Stuck", "…"));
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) {
+    var kept = ReceivedMail.Single(r => r.MessageId == "<dead@example.test>");
+    TestClock.Advance(TimeSpan.FromMinutes(24 * 60 + 1));
+    Workflow.Settle(kept);
+  }
+  runas (Ada) {
+    var kept = ReceivedMail.Single(r => r.MessageId == "<dead@example.test>");
+    Assert.Equal(ReceivedMailStatus.Failed, kept.Status);
+    Assert.Equal("The desk is closed.", kept.Problem);
+    ProviderState.Single().ReceiverThrows = false;
+    RetryReceivedMail(kept);
+    UnitOfWork.Commit();
+    Workflow.Settle(kept);
+  }
+  runas (Ada) {
+    Assert.Equal(ReceivedMailStatus.Handled, ReceivedMail.Single(r => r.MessageId == "<dead@example.test>").Status);
+    Assert.Equal(1, Handled.Count(h => h.MessageId == "<dead@example.test>"));
+  }
+}
+
+[Test(Inbox)]
+void a_provider_that_cannot_be_reached_keeps_the_cursor_and_says_why() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    ProviderState.Single().Down = true;
+    Arrive(1, Plain("<wait@example.test>", "Waiting", "…"));
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) {
+    var watch = MailboxWatch.Single(x => x.Address == "help@acme.test");
+    Assert.Equal("The mailbox could not be read: The provider did not answer.", watch.Problem);
+    Assert.False(ReceivedMail.Any());
+    ProviderState.Single().Down = false;
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) {
+    Assert.True(ReceivedMail.Any(r => r.MessageId == "<wait@example.test>"));
+    Assert.Equal("", MailboxWatch.Single(x => x.Address == "help@acme.test").Problem);
+  }
+}
+
+[Test(Inbox)]
+void a_mail_reads_with_its_encoded_subject_its_html_and_its_files() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Arrive(1, """
+      From: =?utf-8?B?w4VzYSDDlnN0ZXJiZXJn?= <asa@example.se>
+      To: help@acme.test
+      Subject: =?utf-8?Q?Sk=C3=A4rmbild_p=C3=A5_felet?=
+      Message-ID: <files@example.se>
+      MIME-Version: 1.0
+      Content-Type: multipart/mixed; boundary="outer"
+
+      --outer
+      Content-Type: multipart/alternative; boundary="alt"
+
+      --alt
+      Content-Type: text/plain; charset=utf-8
+
+      Se bilden.
+      --alt
+      Content-Type: text/html; charset=utf-8
+
+      <p>Se bilden.</p>
+      --alt--
+      --outer
+      Content-Type: image/png; name="screenshot.png"
+      Content-Disposition: attachment; filename="screenshot.png"
+      Content-Transfer-Encoding: base64
+
+      iVBORw0KGgo=
+      --outer
+      Content-Type: text/x-csharp; name="Export.cs"
+      Content-Disposition: attachment; filename="Export.cs"
+
+      class Export { }
+      --outer--
+      """);
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) {
+    var kept = ReceivedMail.Single(r => r.MessageId == "<files@example.se>");
+    Assert.Equal("Skärmbild på felet", kept.Subject);
+    var handed = Handled.Single(h => h.MessageId == "<files@example.se>");
+    Assert.Equal("Åsa Österberg <asa@example.se>", handed.From);
+    Assert.Equal(2, handed.Files);
+    var mail = ParseMail(File.ReadAllBytes(kept.Original!));
+    Assert.Equal("<p>Se bilden.</p>", (mail.Html ?? "").Trim());
+    Assert.Equal("screenshot.png", mail.Attachments[0].FileName);
+    Assert.Equal("image/png", mail.Attachments[0].ContentType);
+    Assert.Equal("Export.cs", mail.Attachments[1].FileName);
+    Assert.Equal("class Export { }", Encoding.UTF8.GetString(mail.Attachments[1].Content).Trim());
+  }
+}
+
+[Test(Inbox)]
+void a_bounce_names_the_mail_it_returns_in_its_failed_ids() {
+  runas (Ada) {
+    var bounce = ParseMail(Encoding.UTF8.GetBytes("""
+      From: Mail Delivery Subsystem <mailer-daemon@googlemail.com>
+      To: help@acme.test
+      Subject: Delivery Status Notification (Failure)
+      Message-ID: <dsn-1@mx.google.com>
+      MIME-Version: 1.0
+      Content-Type: multipart/report; report-type=delivery-status; boundary="r"
+
+      --r
+      Content-Type: text/plain; charset=utf-8
+
+      Address not found.
+      --r
+      Content-Type: message/delivery-status
+
+      Reporting-MTA: dns; googlemail.com
+      Final-Recipient: rfc822; nobody@example.test
+      Action: failed
+      Status: 5.1.1
+      --r
+      Content-Type: message/rfc822
+
+      From: Acme Help <help@acme.test>
+      To: nobody@example.test
+      Subject: Re: Your order
+      Message-ID: <ours-42@acme.test>
+
+      Thanks for writing.
+      --r--
+      """));
+    Assert.Equal(1, bounce.FailedMessageIds.Count);
+    Assert.Equal("<ours-42@acme.test>", bounce.FailedMessageIds[0]);
+    // …and a FORWARDED message inside an ordinary mail is not a bounce.
+    var forward = ParseMail(Encoding.UTF8.GetBytes("""
+      From: Cus <cus@example.test>
+      To: help@acme.test
+      Subject: Fwd: Re: Your order
+      MIME-Version: 1.0
+      Content-Type: multipart/mixed; boundary="f"
+
+      --f
+      Content-Type: text/plain
+
+      See below.
+      --f
+      Content-Type: message/rfc822
+
+      From: Acme Help <help@acme.test>
+      Subject: Re: Your order
+      Message-ID: <ours-43@acme.test>
+
+      Earlier.
+      --f--
+      """));
+    Assert.Equal(0, forward.FailedMessageIds.Count);
+  }
+}
+
+[Test(Inbox)]
+void erasing_a_sender_forgets_what_they_sent_original_and_all() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Arrive(1, Plain("<forget-me@example.test>", "About me", "Personal details."));
+    UnitOfWork.Commit();
+  }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) {
+    var original = ReceivedMail.Single(r => r.MessageId == "<forget-me@example.test>").Original!.Id;
+    // Erasure runs as the system, the way an app's erasure workflow runs it.
+    var request = new EraseRequest { Address = "Cus@Example.test", Watch = original };
+    UnitOfWork.Commit();
+    Workflow.Settle(request);
+    Assert.Equal(1, EraseRequest.Single().Reached);
+    Assert.False(ReceivedMail.Any(r => r.MessageId == "<forget-me@example.test>"));
+    // Asked by the system, which sees every file: the original is gone too, not merely out of the agent's sight.
+    Assert.False(EraseRequest.Single().WatchedFileLeft);
+  }
+}
+
+[Test(Inbox)]
+void a_customer_cannot_read_the_mail_the_desk_received() {
+  runas (Ada) { Watch(); }
+  runas (Ada) { Arrive(1, Plain("<private@example.test>", "Private", "…")); UnitOfWork.Commit(); }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) { Assert.True(ReceivedMail.Any(r => r.MessageId == "<private@example.test>")); }
+  runas (Cus) { Assert.False(ReceivedMail.Any(r => r.MessageId == "<private@example.test>")); }
+}
