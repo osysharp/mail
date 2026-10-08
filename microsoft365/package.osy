@@ -1,0 +1,21 @@
+// Osysharp.Mail.Microsoft365 — a Microsoft 365 / Exchange Online mailbox as an `Osysharp.Mail` mailbox: the app watches
+// it for new mail and sends from it, threaded, through Microsoft Graph.
+//
+// ⚑ YOUR OWN APP REGISTRATION (BYOK). The app brings an Entra ID app registration of its own — a tenant id, a client id
+//   and a client secret — granted the APPLICATION permissions `Mail.Read` and `Mail.Send`, which an administrator of the
+//   tenant consents to once. Scope it to the support mailbox with an Exchange application access policy, so the app can
+//   read no other mailbox in the tenant. The secret is the app's: this package never learns its name.
+//
+// ⭐ The client-credentials grant sends the client secret in a FORM BODY, which is how Entra ID's token endpoint takes
+//    it — so this package says so, and the app's grant of the host is its acceptance (D-SECRETSINK1).
+package Osysharp.Mail.Microsoft365 {
+  version     "0.2.0";
+  minPlatform "0.9.0";
+  summary     "a Microsoft 365 mailbox as a mailbox for Osysharp.Mail — new mail polled through Graph, replies sent from it, threaded.";
+  model "model/*.osy";
+  use Osysharp.Mail@0;
+  use Osysharp.Http;
+  egress "login.microsoftonline.com" { secretIn body "client_secret"; }
+  egress "graph.microsoft.com";
+  tests "tests";
+}

@@ -1,0 +1,259 @@
+// Osysharp.Mail.Microsoft365 — every test stubs Microsoft's endpoints exactly as documented (client-credentials token,
+// the inbox's messages delta, /messages/{id}/$value, /sendMail with a MIME body) and asserts what the app KEPT or what
+// reached the wire.
+
+using Osysharp.Http;
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Mail.Microsoft365;
+
+[TestFixture]
+void Inbox() {
+  var ada = new Person { Email = "ada@acme.test", DisplayName = "Ada" };
+  new RoleGrant { Member = ada, Role = AppRole.Agent };
+  new Graph();
+  Http.Post.Stub((url, body) => {
+    new WireLog { Verb = "POST", Url = url, Body = body };
+    if (url.StartsWith("https://login.microsoftonline.com/")) {
+      return new HttpResponse { StatusCode = 200, Body = "{\"token_type\":\"Bearer\",\"access_token\":\"eyJ.graph\"}" };
+    }
+    if (url == "https://graph.microsoft.com/v1.0/subscriptions") {
+      Graph.Single().Subscriptions = Graph.Single().Subscriptions + 1;
+      return new HttpResponse { StatusCode = 201, Body = "{\"id\":\"sub-" + Graph.Single().Subscriptions.ToString()
+        + "\",\"expirationDateTime\":\"" + DateTime.UtcNow.AddMinutes(4200).ToString("o") + "\"}" };
+    }
+    return new HttpResponse { StatusCode = 202, Body = "" };
+  });
+  Http.Patch.Stub((url, body) => {
+    new WireLog { Verb = "PATCH", Url = url, Body = body };
+    if (Graph.Single().LostSubscription) {
+      return new HttpResponse { StatusCode = 404, Body = "{\"error\":{\"code\":\"ResourceNotFound\",\"message\":\"gone\"}}" };
+    }
+    var id = url.Substring(url.LastIndexOf("/") + 1);
+    return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"" + id + "\",\"expirationDateTime\":\""
+      + DateTime.UtcNow.AddMinutes(4200).ToString("o") + "\"}" };
+  });
+  Http.Delete.Stub(url => {
+    new WireLog { Verb = "DELETE", Url = url };
+    return new HttpResponse { StatusCode = 204, Body = "" };
+  });
+  Http.Get.Stub(url => {
+    new WireLog { Verb = "GET", Url = url };
+    if (url.Contains("/messages/delta?$select=id")) {
+      // Start-now: an empty window, answered with the first round's delta link.
+      return new HttpResponse { StatusCode = 200, Body = "{\"value\":[],\"@odata.deltaLink\":\"" + DeltaLink(0) + "\"}" };
+    }
+    if (url.Contains("$deltatoken=r")) {
+      if (Graph.Single().Lapsed) { return new HttpResponse { StatusCode = 410, Body = "{\"error\":{\"code\":\"syncStateNotFound\"}}" }; }
+      var round = int.Parse(url.Substring(url.IndexOf("$deltatoken=r") + 13));
+      return new HttpResponse { StatusCode = 200, Body = DeltaJson(round) };
+    }
+    var id = url.Substring(url.IndexOf("/messages/") + 10).Replace("/$value", "");
+    var raw = GraphMessage.Single(m => m.GraphId == id).Raw;
+    return new HttpResponse { StatusCode = 200, Body = raw, Bytes = Encoding.UTF8.GetBytes(raw) };
+  });
+}
+
+principal Ada => Person.Single(p => p.Email == "ada@acme.test");
+
+string Mail(string id, string subject) {
+  return "From: Cus <cus@example.test>\nTo: support@acme.test\nSubject: " + subject + "\nMessage-ID: " + id
+    + "\nMIME-Version: 1.0\nContent-Type: text/plain\n\nHello.\n";
+}
+
+void Watch() {
+  var w = WatchMailbox("support@acme.test");
+  UnitOfWork.Commit();
+  Workflow.Settle(w);
+}
+
+void Poll() {
+  Workflow.Settle(MailboxWatch.Single());
+  foreach (var r in ReceivedMail.ToList()) { Workflow.Settle(r); }
+}
+
+[Test(Inbox)]
+void a_new_watch_starts_a_delta_from_now_and_imports_nothing_older() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Assert.Equal(DeltaLink(0), MailboxWatch.Single().Cursor);
+    Assert.False(ReceivedMail.Any());
+    var start = WireLog.Single(w => w.Url.Contains("/messages/delta?$select=id"));
+    Assert.Contains("$filter=receivedDateTime+ge+", start.Url);
+    // An app-only token, from the tenant's own sign-in endpoint, with the client secret in the form body.
+    var token = WireLog.First(w => w.Verb == "POST");
+    Assert.Equal("https://login.microsoftonline.com/tenant-1/oauth2/v2.0/token", token.Url);
+    Assert.Contains("grant_type=client_credentials", token.Body);
+  }
+}
+
+[Test(Inbox)]
+void new_mail_in_the_delta_is_fetched_as_mime_and_kept_and_a_removal_is_not() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Arrive("AAMk-1", Mail("<one@example.test>", "Printer on fire"));
+    Arrive("AAMk-2", Mail("<gone@example.test>", "Deleted"), removed: true);
+    UnitOfWork.Commit();
+    TestClock.Advance(TimeSpan.FromMinutes(1));
+    Poll();
+  }
+  runas (Ada) {
+    var kept = ReceivedMail.Single();
+    Assert.Equal("AAMk-1", kept.ProviderId);
+    Assert.Equal("<one@example.test>", kept.MessageId);
+    Assert.Equal(1, Handled.Count(h => h.Subject == "Printer on fire"));
+    Assert.Equal(DeltaLink(1), MailboxWatch.Single().Cursor);
+    Assert.True(WireLog.Any(w => w.Url.EndsWith("/users/support%40acme.test/messages/AAMk-1/$value")));
+    Assert.False(WireLog.Any(w => w.Url.Contains("/messages/AAMk-2/")));
+  }
+}
+
+[Test(Inbox)]
+void a_reply_goes_through_sendmail_as_mime_with_its_thread() {
+  runas (Ada) {
+    var reply = SendMail(new MailMessage {
+      From = "Acme Support <support@acme.test>", To = ["cus@example.test"], Subject = "Re: Printer on fire",
+      Text = "Unplug it.", InReplyTo = "<one@example.test>", References = ["<one@example.test>"],
+    });
+    UnitOfWork.Commit();
+    Workflow.Settle(reply);
+  }
+  runas (Ada) {
+    var sent = OutgoingMail.Single();
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.Equal("microsoft365", sent.SentWith);
+    var wire = WireLog.Single(w => w.Url == "https://graph.microsoft.com/v1.0/users/support%40acme.test/sendMail");
+    var mail = ParseMail(Convert.FromBase64String(wire.Body));
+    Assert.Equal("<one@example.test>", mail.InReplyTo);
+    Assert.Equal(sent.MessageId, mail.MessageId);
+  }
+}
+
+[Test(Inbox)]
+void a_lapsed_delta_restarts_from_now_and_says_so() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Graph.Single().Lapsed = true;
+    UnitOfWork.Commit();
+    TestClock.Advance(TimeSpan.FromMinutes(1));
+    Poll();
+  }
+  runas (Ada) {
+    Assert.Equal(DeltaLink(0), MailboxWatch.Single().Cursor);
+    Assert.Contains("was not taken in", MailboxWatch.Single().Problem);
+  }
+}
+
+[Test(Inbox)]
+void a_mailbox_with_no_client_secret_is_not_ready_and_says_which_setting() {
+  var box = new Microsoft365Mailbox { Address = "help@acme.test", TenantId = "t", ClientId = "c" };
+  Assert.False(box.IsReady());
+  Assert.Contains("no client secret yet", box.NotReadyReason());
+}
+
+// ── push (0.2.0): Graph change notifications through the app's push door ───────────────────────────────────────
+
+MailboxWatch PushBox() { return MailboxWatch.Single(w => w.Address == "push@acme.test"); }
+
+void WatchPushBox() {
+  var w = WatchMailbox("push@acme.test");
+  UnitOfWork.Commit();
+  Workflow.Settle(w);
+}
+
+/// The subscription request that reached Graph — its clientState is the secret every notification must echo.
+GraphSubscriptionRequest Subscribed() {
+  return JsonSerializer.Deserialize<GraphSubscriptionRequest>(
+    WireLog.First(w => w.Verb == "POST" && w.Url == "https://graph.microsoft.com/v1.0/subscriptions").Body);
+}
+
+int Notify(string subscription, string clientState, string lifecycle = "") {
+  var item = "{\"subscriptionId\":\"" + subscription + "\",\"clientState\":\"" + clientState
+    + "\",\"changeType\":\"created\",\"resource\":\"Users/1/Messages/2\""
+    + (lifecycle == "" ? "" : ",\"lifecycleEvent\":\"" + lifecycle + "\"") + "}";
+  return Api.Post("/api/rest/v1/mail-push/microsoft365", "{\"value\":[" + item + "]}").StatusCode;
+}
+
+[Test(Inbox)]
+void a_watched_inbox_is_subscribed_to_graph_notifications_through_the_push_door() {
+  runas (Ada) { WatchPushBox(); }
+  runas (Ada) {
+    var sub = Subscribed();
+    Assert.Equal("created", sub.ChangeType);
+    Assert.Equal("users/push@acme.test/mailFolders('inbox')/messages", sub.Resource);
+    Assert.True(sub.NotificationUrl.EndsWith("/api/rest/v1/mail-push/microsoft365"));
+    Assert.Equal(sub.NotificationUrl, sub.LifecycleNotificationUrl);
+    Assert.True(sub.ClientState.Length >= 32);
+    Assert.Equal("sub-1", PushBox().PushId);
+  }
+}
+
+[Test(Inbox)]
+void the_push_door_answers_graphs_validation_handshake() {
+  var r = Api.Post("/api/rest/v1/mail-push/microsoft365?validationToken=" + Uri.EscapeDataString("Validation: Testing client application reachability"), "");
+  Assert.Equal(200, r.StatusCode);
+  Assert.Equal("Validation: Testing client application reachability", r.Body);
+}
+
+[Test(Inbox)]
+void a_notification_echoing_its_secret_wakes_a_fetch_and_one_that_does_not_wakes_nothing() {
+  runas (Ada) { WatchPushBox(); }
+  runas (Ada) {
+    Assert.Equal(200, Notify("sub-1", "forged"));
+    Assert.Equal(MailboxWatchState.Watching, PushBox().State);
+    Assert.Equal(200, Notify("sub-1", Subscribed().ClientState));
+    Assert.Equal(MailboxWatchState.Woken, PushBox().State);
+    var deltasBefore = WireLog.Count(w => w.Url.Contains("$deltatoken="));
+    TestClock.Advance(TimeSpan.FromSeconds(5));
+    Workflow.Settle(PushBox());
+    Assert.True(WireLog.Count(w => w.Url.Contains("$deltatoken=")) > deltasBefore);   // it asked Graph what changed
+    Assert.Equal(MailboxWatchState.Watching, PushBox().State);
+  }
+}
+
+[Test(Inbox)]
+void the_subscription_is_renewed_by_patching_its_expiry_and_keeps_its_secret() {
+  runas (Ada) { WatchPushBox(); }
+  runas (Ada) {
+    var secret = Subscribed().ClientState;
+    TestClock.Advance(TimeSpan.FromHours(36));
+    Workflow.Settle(PushBox());
+    Assert.True(WireLog.Any(w => w.Verb == "PATCH" && w.Url == "https://graph.microsoft.com/v1.0/subscriptions/sub-1"));
+    Assert.Equal(1, Graph.Single().Subscriptions);
+    // Graph goes on echoing the clientState it was created with — and that still wakes the watch.
+    Assert.Equal(200, Notify("sub-1", secret));
+    Assert.Equal(MailboxWatchState.Woken, PushBox().State);
+  }
+}
+
+[Test(Inbox)]
+void a_subscription_graph_has_lost_is_made_again_when_it_is_due() {
+  runas (Ada) { WatchPushBox(); }
+  runas (Ada) {
+    Graph.Single().LostSubscription = true;
+    UnitOfWork.Commit();
+    TestClock.Advance(TimeSpan.FromHours(36));
+    Workflow.Settle(PushBox());
+    Assert.Equal(2, Graph.Single().Subscriptions);
+    Assert.Equal("sub-2", PushBox().PushId);
+  }
+}
+
+[Test(Inbox)]
+void graphs_reauthorization_request_renews_on_the_next_fetch() {
+  runas (Ada) { WatchPushBox(); }
+  runas (Ada) {
+    Assert.Equal(200, Notify("sub-1", Subscribed().ClientState, "reauthorizationRequired"));
+    TestClock.Advance(TimeSpan.FromSeconds(5));
+    Workflow.Settle(PushBox());
+    Assert.True(WireLog.Any(w => w.Verb == "PATCH"));
+  }
+}
+
+[Test(Inbox)]
+void stopping_the_watch_deletes_the_subscription() {
+  runas (Ada) { WatchPushBox(); }
+  runas (Ada) { StopWatchingMailbox(PushBox()); UnitOfWork.Commit(); }
+  runas (Ada) { Assert.True(WireLog.Any(w => w.Verb == "DELETE" && w.Url == "https://graph.microsoft.com/v1.0/subscriptions/sub-1")); }
+}

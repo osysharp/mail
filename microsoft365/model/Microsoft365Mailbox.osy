@@ -1,0 +1,247 @@
+namespace Osysharp.Mail.Microsoft365;
+
+using Osysharp.Http;
+using Osysharp.Mail;
+
+/// A Microsoft 365 / Exchange Online mailbox, watched and sent from through Microsoft Graph:
+///
+///   app.Mail = new MailSetup {
+///     Mailboxes = [new Microsoft365Mailbox {
+///       Address      = "support@acme.com",
+///       TenantId     = "00000000-0000-0000-0000-000000000000",
+///       ClientId     = "11111111-1111-1111-1111-111111111111",
+///       ClientSecret = Security.IsSecretSet("GraphClientSecret") ? Secret.GraphClientSecret : "",
+///     }],
+///   };
+///
+/// NEW MAIL is read through a DELTA QUERY on the inbox: the cursor is the delta link Graph hands back, and each poll asks
+/// it what changed since — so nothing is fetched twice and nothing already in the inbox is imported. Each new message is
+/// fetched whole (`/$value`, its MIME) and handed over as it arrived.
+///
+/// SENDING goes through `sendMail` as the RFC 5322 message the outbox built (Graph's MIME send), so its Message-ID,
+/// In-Reply-To and References are the ones the conversation knows, and it is saved to the mailbox's Sent Items.
+///
+/// PUSH (0.2.0, D-PUSHMAIL1): the inbox is SUBSCRIBED to Graph change notifications — new messages in it are announced
+/// to the app's push door (which answers Graph's validation handshake), each carrying the per-subscription secret
+/// (`clientState`) that proves it; lifecycle notices (reauthorization, removal, missed) are handled too. A mail
+/// subscription lives about three days and is renewed well before (`PATCH` of its expiry, a new one if Graph lost it);
+/// a half-hourly poll catches anything Graph dropped. `Push = false` keeps the mailbox polled.
+public class Microsoft365Mailbox : IMailbox {
+  public string Key { get; } = "microsoft365";
+  /// The mailbox's address — the user principal name or primary SMTP address of the support mailbox.
+  public string Address { get; set; } = "";
+  /// The Entra ID tenant the mailbox lives in.
+  public string TenantId = "";
+  /// The app registration's client id.
+  public string ClientId = "";
+  /// The app registration's client secret — `Secret.X`, or empty while there is none.
+  public string ClientSecret = "";
+  /// Microsoft Graph's root, unless a gateway that speaks the same wire stands in front of it.
+  public string GraphUrl = "https://graph.microsoft.com/v1.0";
+  /// Entra ID's sign-in root.
+  public string LoginUrl = "https://login.microsoftonline.com";
+  /// Subscribe to Graph change notifications (the default). False: the mailbox is polled.
+  public bool Push = true;
+
+  public bool IsReady() { return Address != "" && TenantId != "" && ClientId != "" && ClientSecret != ""; }
+
+  /// Which setting is missing.
+  public string NotReadyReason() {
+    if (Address == "") { return "This Microsoft 365 mailbox has no Address."; }
+    if (TenantId == "" || ClientId == "") {
+      return $"The Microsoft 365 mailbox '{Address}' has no app registration yet — set TenantId and ClientId.";
+    }
+    return $"The Microsoft 365 mailbox '{Address}' has no client secret yet — set ClientSecret from its app registration.";
+  }
+
+  public MailboxPage Fetch(string cursor, int max) {
+    var headers = Bearer();
+    headers.Add("Prefer", "odata.maxpagesize=" + max.ToString());
+    if (cursor == "") {
+      // START NOW: a delta over the mail that arrives from this moment, so the inbox's history is never imported.
+      var start = MailboxRoot() + "/mailFolders/inbox/messages/delta?$select=id&$filter=receivedDateTime+ge+"
+        + DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+      var page = Page(Http.Get(start, headers), "start watching");
+      // Walk to the delta link: an empty window answers it at once.
+      while (page.NextLink != "") { page = Page(Http.Get(page.NextLink, headers), "start watching"); }
+      return new MailboxPage { Cursor = page.DeltaLink };
+    }
+    var changes = Http.Get(cursor, headers);
+    if (changes.StatusCode == 410) {
+      // Graph let the delta token lapse ("syncStateNotFound"): there is no "since" any more. Start from now, and say so.
+      var restarted = Fetch("", max);
+      restarted.Notice = $"Microsoft 365 no longer knew where '{Address}' was last read, so mail that arrived while it was "
+        + "not being read was not taken in. Watching resumed from now.";
+      return restarted;
+    }
+    var delta = Page(changes, "list new mail");
+    var result = new MailboxPage { Cursor = delta.NextLink != "" ? delta.NextLink : delta.DeltaLink };
+    foreach (var changed in delta.Value) {
+      if (changed.Removed != null) { continue; }   // a message moved or deleted — nothing new to take in
+      var raw = Http.Get(MailboxRoot() + "/messages/" + changed.Id + "/$value", headers);
+      if (!raw.IsSuccess) {
+        throw new ExternalServiceException($"Microsoft 365 could not fetch a message from '{Address}': it answered {raw.StatusCode}.");
+      }
+      result.Items.Add(new MailboxItem { ProviderId = changed.Id, Raw = raw.Bytes ?? Encoding.UTF8.GetBytes(raw.Body) });
+    }
+    return result;
+  }
+
+  public bool CanPush() { return Push && IsReady(); }
+
+  /// A Graph subscription to messages CREATED in the inbox — notifications and lifecycle notices both to the app's push
+  /// door, `secret` as the `clientState` every one will echo, for the longest Graph allows a mail subscription.
+  public MailboxSubscription Subscribe(string notifyUrl, string secret) {
+    var request = new GraphSubscriptionRequest {
+      ChangeType = "created", NotificationUrl = notifyUrl, LifecycleNotificationUrl = notifyUrl,
+      Resource = "users/" + Address + "/mailFolders('inbox')/messages",
+      ExpirationDateTime = DateTime.UtcNow.AddMinutes(MaxSubscriptionMinutes).ToString("yyyy-MM-ddTHH:mm:ssZ"),
+      ClientState = secret,
+    };
+    var made = Http.Post(GraphUrl + "/subscriptions", JsonSerializer.Serialize(request), "application/json", Bearer());
+    return SubscriptionOf(made, "subscribe to new mail");
+  }
+
+  /// PATCH the subscription's expiry. Graph keeps its `clientState`. One Graph no longer knows (404) is made again.
+  public MailboxSubscription Renew(MailboxSubscription current, string notifyUrl, string secret) {
+    var body = JsonSerializer.Serialize(new GraphSubscriptionExpiry {
+      ExpirationDateTime = DateTime.UtcNow.AddMinutes(MaxSubscriptionMinutes).ToString("yyyy-MM-ddTHH:mm:ssZ") });
+    var renewed = Http.Patch(GraphUrl + "/subscriptions/" + Uri.EscapeDataString(current.Id), body, "application/json", Bearer());
+    if (renewed.StatusCode == 404) { return Subscribe(notifyUrl, secret); }
+    return SubscriptionOf(renewed, "renew its subscription");
+  }
+
+  public void Unsubscribe(MailboxSubscription current) {
+    var gone = Http.Delete(GraphUrl + "/subscriptions/" + Uri.EscapeDataString(current.Id), Bearer());
+    if (!gone.IsSuccess && gone.StatusCode != 404) {
+      throw new ExternalServiceException($"Microsoft 365 did not cancel the subscription for '{Address}': it answered {gone.StatusCode}.");
+    }
+  }
+
+  /// Graph's notification body: `{"value": [{subscriptionId, clientState, changeType, resource, lifecycleEvent?}]}`.
+  /// Read as notices for their subscriptions; whether each is OURS is the watch's to check (its `clientState`).
+  public List<MailboxNotice> ReadPush(string body, string notifyUrl) {
+    var notices = new List<MailboxNotice>();
+    foreach (var n in JsonSerializer.Deserialize<GraphNotifications>(body).Value) {
+      if (n.SubscriptionId == "") { continue; }
+      notices.Add(new MailboxNotice { Subscription = n.SubscriptionId, ClientState = n.ClientState ?? "", Lifecycle = n.LifecycleEvent ?? "" });
+    }
+    return notices;
+  }
+
+  /// Graph lets a subscription to mail live at most 10080 minutes on some resources and 4230 on messages; ask for a
+  /// little less than the latter, so a clock skew never makes Graph refuse the request.
+  int MaxSubscriptionMinutes = 4200;
+
+  MailboxSubscription SubscriptionOf(HttpResponse r, string doing) {
+    if (!r.IsSuccess) {
+      throw new ExternalServiceException($"Microsoft 365 would not {doing} for '{Address}': it answered {r.StatusCode} {GraphErrorOf(r.Body)}");
+    }
+    var made = JsonSerializer.Deserialize<GraphSubscription>(r.Body);
+    return new MailboxSubscription { Id = made.Id, ExpiresAt = DateTime.Parse(made.ExpirationDateTime).ToUniversalTime() };
+  }
+
+  /// Graph's own words for a refusal (`{"error": {"message": …}}`), or "" — what an admin needs to fix it.
+  string GraphErrorOf(string body) {
+    if (!body.Contains("\"error\"")) { return ""; }
+    var e = JsonSerializer.Deserialize<GraphErrorBody>(body).Error.Message;
+    return e.Length > 300 ? e.Substring(0, 300) : e;
+  }
+
+  public string SendMail(MailMessage message, string idempotencyKey) {
+    var sent = Http.Post(MailboxRoot() + "/sendMail", Convert.ToBase64String(RawOf(message)), "text/plain", Bearer());
+    if (!sent.IsSuccess) {
+      throw new ExternalServiceException($"Microsoft 365 did not send the message from '{Address}': it answered {sent.StatusCode}.");
+    }
+    // Graph answers 202 with no id; the message's own Message-ID is what threads it and what a delivery is known by.
+    return message.MessageId;
+  }
+
+  string MailboxRoot() { return GraphUrl + "/users/" + Uri.EscapeDataString(Address); }
+
+  /// An app-only access token for the tenant (client credentials). Asked per poll, for the reason the Gmail mailbox
+  /// gives: a token lives an hour, a poll is a minute apart, and keeping one is a cache to invalidate for nothing.
+  Dictionary<string, string> Bearer() {
+    var form = "grant_type=client_credentials&scope=" + Uri.EscapeDataString("https://graph.microsoft.com/.default")
+      + "&client_id=" + Uri.EscapeDataString(ClientId)
+      + "&client_secret=" + Uri.EscapeDataString(ClientSecret);
+    var answered = Http.Post(LoginUrl + "/" + Uri.EscapeDataString(TenantId) + "/oauth2/v2.0/token", form,
+      "application/x-www-form-urlencoded", new Dictionary<string, string>());
+    if (!answered.IsSuccess) {
+      throw new ExternalServiceException(answered.StatusCode == 400 || answered.StatusCode == 401
+        ? $"Microsoft refused the app registration's credentials for '{Address}' ({answered.StatusCode}) — the client secret expired or was replaced. Set the new one."
+        : $"Microsoft's sign-in endpoint answered {answered.StatusCode} for '{Address}'.");
+    }
+    var headers = new Dictionary<string, string>();
+    headers.Add("Authorization", "Bearer " + JsonSerializer.Deserialize<GraphToken>(answered.Body).AccessToken);
+    return headers;
+  }
+
+  GraphDeltaPage Page(HttpResponse r, string doing) {
+    if (!r.IsSuccess) {
+      throw new ExternalServiceException($"Microsoft 365 could not {doing} for '{Address}': it answered {r.StatusCode}.");
+    }
+    return JsonSerializer.Deserialize<GraphDeltaPage>(r.Body);
+  }
+}
+
+// ── the wire ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+public class GraphToken {
+  [ExternalName("access_token")] public string AccessToken = "";
+}
+
+public class GraphDeltaPage {
+  public List<GraphChange> Value = [];
+  [ExternalName("@odata.nextLink")] public string NextLink = "";
+  [ExternalName("@odata.deltaLink")] public string DeltaLink = "";
+}
+
+public class GraphChange {
+  public string Id = "";
+  /// Present when the change is a REMOVAL (`"@removed": { "reason": "deleted" }`).
+  [ExternalName("@removed")] public GraphRemoved? Removed = null;
+}
+
+public class GraphRemoved {
+  public string Reason = "";
+}
+
+public class GraphSubscriptionRequest {
+  [ExternalName("changeType")] public string ChangeType = "";
+  [ExternalName("notificationUrl")] public string NotificationUrl = "";
+  [ExternalName("lifecycleNotificationUrl")] public string LifecycleNotificationUrl = "";
+  [ExternalName("resource")] public string Resource = "";
+  [ExternalName("expirationDateTime")] public string ExpirationDateTime = "";
+  [ExternalName("clientState")] public string ClientState = "";
+}
+
+public class GraphSubscriptionExpiry {
+  [ExternalName("expirationDateTime")] public string ExpirationDateTime = "";
+}
+
+public class GraphSubscription {
+  public string Id = "";
+  public string ExpirationDateTime = "";
+}
+
+public class GraphNotifications {
+  public List<GraphNotification> Value = [];
+}
+
+public class GraphNotification {
+  public string SubscriptionId = "";
+  public string? ClientState = null;
+  public string ChangeType = "";
+  public string Resource = "";
+  public string? LifecycleEvent = null;
+}
+
+public class GraphErrorBody {
+  public GraphError Error = new GraphError();
+}
+
+public class GraphError {
+  public string Code = "";
+  public string Message = "";
+}
