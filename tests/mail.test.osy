@@ -126,7 +126,7 @@ void erasing_an_address_forgets_the_mail_sent_to_it_and_keeps_the_others_record(
     Notify("cus@example.test", "Your ticket", "We are on it.");
     SendMail(new MailMessage { To = ["cus@example.test", "boss@example.test"], Subject = "The two of you",
                                Text = "Both of you, please confirm." });
-    Notify("other@example.test", "Someone else", "Not about Cus.");
+    Notify("other@example.test", "Another reader", "Not about Cus.");
     UnitOfWork.Commit();
     Assert.Equal(2, EraseMailTo("Cus@Example.test"));
     UnitOfWork.Commit();

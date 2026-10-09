@@ -6,8 +6,8 @@
     {
       "name": "Osysharp.Identity",
       "kind": "package",
-      "version": "0.7.0",
-      "hash": "sha256:a8f780ee024fb27a6c1f909feb86fec10c8a176788acd8546d1380a9243575bd",
+      "version": "0.8.0",
+      "hash": "sha256:7fadb5f2628cfd6895c44d2e88725b39055ea36c3a8276b3b345c72a931f4358",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/identity",
@@ -16,8 +16,8 @@
     {
       "name": "Osysharp.Mail",
       "kind": "package",
-      "version": "0.9.0",
-      "hash": "sha256:9d881411b8948aae3c06adeb2ebe9cd828d198e07bef0d5c002c83206ca6e013",
+      "version": "0.9.1",
+      "hash": "sha256:f5ab34a71cb0e304e272d479002e46ef7f4f8c8efca9cb9e3243e16d977fa2e2",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/mail",
@@ -26,11 +26,20 @@
     {
       "name": "Osysharp.Workflow",
       "kind": "package",
-      "version": "1.0.0",
-      "hash": "sha256:c9b5bb60a8be44efc0030d73b0bd60bdab05926344a68fb4db29dc78ee94c2f8",
+      "version": "1.0.1",
+      "hash": "sha256:9f7ccf1f6dbf22b62e551b015333d41c46431491acd812fb626762531e2a97f8",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Workflow"
     }
-  ]
+  ],
+  "bridges": {
+    "searched": [
+      "workspace",
+      "platform"
+    ],
+    "skipped": [
+      "github: offline \u2014 the public catalog was not searched for bridges. Run \u0060osy lock\u0060 with a network to look."
+    ]
+  }
 }

@@ -19,6 +19,7 @@ public enum MailStatus {
 ///   Nothing else can put a row here, so nobody can use the app to send mail in its name to anybody they like.
 [Authority(Extensible)]
 public entity OutgoingMail {
+  [CreatedAt] DateTime? CreatedAt;
   /// The recipients, comma-separated.
   [Required, Classification(Personal.Contact), MaxLength(1000)] string To;
   [Classification(Personal.Contact), MaxLength(1000)] string? Cc;
