@@ -65,7 +65,7 @@ public class ImapMailbox : IMailbox {
     return message.MessageId;
   }
 
-  /// IMAP is POLLED (D-PUSHMAIL1): IDLE would hold a connection open per mailbox for as long as it is watched, which
+  /// IMAP is POLLED: IDLE would hold a connection open per mailbox for as long as it is watched, which
   /// costs more than it saves. Asked every five minutes by default — and no more often than the app's plan allows.
   public TimeSpan PollEvery() { return PollInterval; }
 

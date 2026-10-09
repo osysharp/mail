@@ -1,6 +1,6 @@
 // The producer's test project for Osysharp.Mail.Imap — a watched IMAP mailbox and replies over SMTP, asserted on what
 // the stubbed servers were asked and what the app kept. `Imap.Fetch` and `Smtp.Send` are stubbed, so nothing leaves the
-// process; the platform's own IMAP/SMTP is tested against protocol-level fakes (MailKitMailTransportTests).
+// process; the platform's own IMAP/SMTP is tested against protocol-level fakes.
 app MailImapKitTests {
   model "model/**/*.osy";
   tests "**/*.test.osy";
