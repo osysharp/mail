@@ -7,9 +7,9 @@
 //   read no other mailbox in the tenant. The secret is the app's: this package never learns its name.
 //
 // ⭐ The client-credentials grant sends the client secret in a FORM BODY, which is how Entra ID's token endpoint takes
-//    it — so this package says so, and the app's grant of the host is its acceptance (D-SECRETSINK1).
+//    it — so this package says so, and the app's grant of the host is its acceptance.
 package Osysharp.Mail.Microsoft365 {
-  version     "0.2.1";
+  version "0.2.2";
   minPlatform "0.9.0";
   summary     "a Microsoft 365 mailbox as a mailbox for Osysharp.Mail — new mail polled through Graph, replies sent from it, threaded.";
   model "model/*.osy";

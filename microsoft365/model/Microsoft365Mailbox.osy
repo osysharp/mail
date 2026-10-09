@@ -21,7 +21,7 @@ using Osysharp.Mail;
 /// SENDING goes through `sendMail` as the RFC 5322 message the outbox built (Graph's MIME send), so its Message-ID,
 /// In-Reply-To and References are the ones the conversation knows, and it is saved to the mailbox's Sent Items.
 ///
-/// PUSH (0.2.0, D-PUSHMAIL1): the inbox is SUBSCRIBED to Graph change notifications — new messages in it are announced
+/// PUSH (0.2.0): the inbox is SUBSCRIBED to Graph change notifications — new messages in it are announced
 /// to the app's push door (which answers Graph's validation handshake), each carrying the per-subscription secret
 /// (`clientState`) that proves it; lifecycle notices (reauthorization, removal, missed) are handled too. A mail
 /// subscription lives about three days and is renewed well before (`PATCH` of its expiry, a new one if Graph lost it);
