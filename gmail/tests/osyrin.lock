@@ -15,8 +15,8 @@
     {
       "name": "Osysharp.Identity",
       "kind": "package",
-      "version": "0.7.0",
-      "hash": "sha256:a8f780ee024fb27a6c1f909feb86fec10c8a176788acd8546d1380a9243575bd",
+      "version": "0.8.0",
+      "hash": "sha256:7fadb5f2628cfd6895c44d2e88725b39055ea36c3a8276b3b345c72a931f4358",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/identity",
@@ -25,8 +25,8 @@
     {
       "name": "Osysharp.Mail",
       "kind": "package",
-      "version": "0.9.0",
-      "hash": "sha256:9d881411b8948aae3c06adeb2ebe9cd828d198e07bef0d5c002c83206ca6e013",
+      "version": "0.10.0",
+      "hash": "sha256:8f40fb4add0b7682298672fd1405173722ac1b587c6739933c5ee92736c01cd9",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/mail",
@@ -35,8 +35,8 @@
     {
       "name": "Osysharp.Workflow",
       "kind": "package",
-      "version": "1.0.0",
-      "hash": "sha256:c9b5bb60a8be44efc0030d73b0bd60bdab05926344a68fb4db29dc78ee94c2f8",
+      "version": "1.0.1",
+      "hash": "sha256:9f7ccf1f6dbf22b62e551b015333d41c46431491acd812fb626762531e2a97f8",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Workflow"
@@ -44,8 +44,8 @@
     {
       "name": "Osysharp.Mail.Gmail",
       "kind": "package",
-      "version": "0.2.0",
-      "hash": "sha256:93041ebbebc1c961ee9f3f355d1fd20ac168610a6bce47c2b06c133e25bd5141",
+      "version": "0.2.1",
+      "hash": "sha256:b04c2b995c96b1f29e283732d442ea114e2bc5a092e56cd568ad713820e9256b",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/mail-gmail",
@@ -54,8 +54,8 @@
     {
       "name": "Osysharp.Mail.Receiving",
       "kind": "package",
-      "version": "0.4.1",
-      "hash": "sha256:5ae187bb43a3b31f0c505e999397d7bd4d1b359c63f95c397d1b7045b2795ca2",
+      "version": "0.5.0",
+      "hash": "sha256:f11d354bf19cedfab0aec6ca5b1c3b9b2c310297eec9319df55cbfc5f963b6dd",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/mail-receiving",
@@ -64,8 +64,8 @@
     {
       "name": "Osysharp.Storage",
       "kind": "package",
-      "version": "1.2.0",
-      "hash": "sha256:0e45268f33acd5a0fe1dae3e886ab1d828824fc628f9a34efa81af746b0f57d0",
+      "version": "1.2.1",
+      "hash": "sha256:a344786f4417d7005fb72cb752389bc62ae3e8623fb2cce4b3982fc9b3c7699d",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Storage"
@@ -73,8 +73,8 @@
     {
       "name": "Osysharp.Ui",
       "kind": "package",
-      "version": "2.17.1",
-      "hash": "sha256:17d6d844ed71d4d614d43a6993723da70b2d39241c31e9f9fb58250a5183263c",
+      "version": "2.18.1",
+      "hash": "sha256:5dae9b4103cc649967664228cc945c2d8b5bd9ff8d45e62bf9b67d9db079545e",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Ui"
@@ -82,8 +82,8 @@
     {
       "name": "Osysharp.Oauth",
       "kind": "package",
-      "version": "1.0.0",
-      "hash": "sha256:fd5563824db859a8f313637ed6a74f7bcf232b1c18df6f60ea6fd0cd2cad8f1c",
+      "version": "1.0.1",
+      "hash": "sha256:d98224c50ba53098b1df5c853625d4497a785499c40304f481182b31745e0366",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Oauth"
