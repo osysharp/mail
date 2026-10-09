@@ -1,6 +1,6 @@
 namespace Osysharp.Mail;
 
-// REPLY EXTRACTION (0.5.0, D-RECEIVE1 addendum) — the part of a reply the person just wrote, apart from the history their
+// REPLY EXTRACTION (0.5.0) — the part of a reply the person just wrote, apart from the history their
 // mail client quoted under it, so a timeline shows what was SAID rather than every earlier message again.
 //
 // ⚑ STRUCTURE FIRST, TEXT SECOND. A mail client marks what it quoted, and that mark is exact where it exists: Gmail's

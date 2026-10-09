@@ -51,12 +51,17 @@ app changes carrier by changing one setting, and nothing that sends changes with
 - **Your own** — a class implementing `IMailSender` over `Http.*` for any provider, with its host declared in your
   package's manifest.
 
-## Reserved for a later version
+## Mailboxes
 
-The contract is shaped for what comes next, and none of it is built yet:
+A mailbox is anything implementing `IMailbox` — a Google Workspace / Gmail inbox, a Microsoft 365 one, or any IMAP
+account — named in `app.Mail.Mailboxes`. The app is not a mail server: mail arrives where it always did, and the app
+watches that inbox.
 
-- **Receiving.** Monitored mailboxes (Gmail and Microsoft 365, IMAP as the fallback) read into the same `MailMessage`
-  shape — from, to, cc, subject, text, HTML, attachments, headers, message id, thread references — and matched to their
-  conversation by `InReplyTo`/`References`.
-- **Sending as a connected mailbox** — "send as support@acme.com" through the mailbox itself, as a second
-  `IMailSender`.
+- **Reading.** [Osysharp.Mail.Receiving](https://osyrin.com/templates/kits/mail-receiving/) watches each mailbox and
+  hands what arrives over in the same `MailMessage` shape — from, to, cc, subject, text, HTML, attachments, headers,
+  message id, thread references — so it is matched to its conversation by `InReplyTo`/`References`.
+- **Sending as the mailbox.** A message whose `From` is a connected mailbox's address goes out through that mailbox —
+  a reply to a customer leaves from `support@acme.com`, threaded, and sits in its Sent folder.
+- **Providers:** [Osysharp.Mail.Gmail](https://osyrin.com/templates/kits/mail-gmail/),
+  [Osysharp.Mail.Microsoft365](https://osyrin.com/templates/kits/mail-microsoft365/) and
+  [Osysharp.Mail.Imap](https://osyrin.com/templates/kits/mail-imap/).

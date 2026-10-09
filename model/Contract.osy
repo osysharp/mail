@@ -12,8 +12,8 @@ public class MailAttachment {
   public string ContentId = "";
 }
 
-/// One mail message — the shape a SENT message is written in, and the shape a RECEIVED one will be read in (a later version),
-/// so a conversation is one kind of thing whichever direction each message went.
+/// One mail message — the shape a SENT message is written in, and the shape a RECEIVED one is read in, so a
+/// conversation is one kind of thing whichever direction each message went.
 ///
 /// ⚑ THREADING IS FIRST-CLASS. `MessageId` is the message's own RFC 5322 id — the outbox mints one before it leaves, so
 ///   the app knows it at once — and `InReplyTo` / `References` are the ids of what it answers. A reply that carries them
@@ -71,11 +71,11 @@ public interface IMailSender {
   /// sender leaves HELD. The default names the sender; a sender that knows WHICH setting is missing should say so.
   ///
   /// ⚑ A DEFAULT, added in 0.2.0: a member with a body is one an implementor may omit, so every sender written against
-  ///   0.1.0 compiles unchanged and says this. That is how a contract grows inside a major (D-CONTRACTS1).
+  ///   0.1.0 compiles unchanged and says this. That is how a contract grows inside a major version.
   string NotReadyReason() => $"The mail sender '{Key}' is not ready — its credentials are not set.";
 }
 
-// ── the mailbox (0.5.0, D-RECEIVE1) ──────────────────────────────────────────────────────────────────────────────
+// ── the mailbox (0.5.0) ──────────────────────────────────────────────────────────────────────────────────────────
 
 /// A MAILBOX the app reads, and sends as — a Google Workspace / Gmail inbox, a Microsoft 365 one, or any IMAP account.
 /// The app is not a mail server: the mail arrives where it always did, and the app watches that inbox, the way a person
@@ -86,7 +86,7 @@ public interface IMailSender {
 ///   reply to a customer leaves from `support@acme.com`, threaded, and sits in that mailbox's Sent folder like any reply
 ///   a person wrote there.
 ///
-/// ⚑ GROWS BY DEFAULTED MEMBERS (D-CONTRACTS1): a member added later carries a body, so a mailbox written against this
+/// ⚑ GROWS BY DEFAULTED MEMBERS: a member added later carries a body, so a mailbox written against this
 ///   version keeps compiling.
 public interface IMailbox {
   /// Short and stable — "gmail", "microsoft365", "imap". Recorded on what it received.
@@ -105,7 +105,7 @@ public interface IMailbox {
   /// Answer the provider's own id for it. `idempotencyKey` is stable per message.
   string SendMail(MailMessage message, string idempotencyKey);
 
-  // ── push (0.6.0, D-PUSHMAIL1) — every member DEFAULTED, so a mailbox written before it is simply polled ────────────
+  // ── push (0.6.0) — every member DEFAULTED, so a mailbox written before it is simply polled ────────────
 
   /// Whether this mailbox can TELL the app that mail arrived, rather than being asked. A mailbox that can is watched
   /// by push with a slow safety-net poll; one that cannot is polled every `PollEvery()`.
@@ -138,7 +138,7 @@ public interface IMailbox {
   /// dropped, so a mail is late at worst and never lost.
   TimeSpan SafetyNetEvery() => TimeSpan.FromMinutes(30);
 
-  /// How an admin CONNECTS this mailbox from a page, when it is connected that way (D-PUSHMAIL1): the app's OAuth
+  /// How an admin CONNECTS this mailbox from a page, when it is connected that way: the app's OAuth
   /// client to consent with and the app secret the grant is kept in — what the page hands to
   /// `Security.OAuthConnectUrl(client, secret, returnTo, address)`. Empty `Client`: it is not connected from a page
   /// (an IMAP app password, an app registration's client secret).
@@ -216,7 +216,7 @@ public class MailSetup {
   public string From = "";
   /// Where replies go by default, when that is not `From`.
   public string ReplyTo = "";
-  /// The path of the app's PUSH endpoint (D-PUSHMAIL1) — where a mailbox that can push is told to send its
+  /// The path of the app's PUSH endpoint — where a mailbox that can push is told to send its
   /// notifications, with the provider's key appended (`/api/rest/v1/mail-push` → `…/mail-push/gmail`). Empty: nothing
   /// pushes, and every watched mailbox is polled. See `Osysharp.Mail.Receiving`'s `MailboxPushed` for the endpoint.
   public string PushPath = "";
