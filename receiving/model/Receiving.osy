@@ -105,6 +105,7 @@ public entity MailboxWatch {
 [Authority(Extensible)]
 [Unique(Mailbox, ProviderId)]
 public entity ReceivedMail {
+  [CreatedAt] DateTime? CreatedAt;
   /// The mailbox it arrived in.
   [Required, MaxLength(320)] string Mailbox;
   /// The provider's own id for it, unique within its mailbox.

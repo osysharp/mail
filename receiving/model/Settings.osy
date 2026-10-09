@@ -115,7 +115,7 @@ public class MailboxSettingsSections : ISettingsProvider {
 }
 
 /// The mailboxes, as a settings page.
-[Page("/settings/mailboxes")] [Layout(SettingsFrame)] [Authorize(ManagesMailboxes)] [Render(CSR)] [Title("Mailboxes")]
+[Route("/settings/mailboxes")] [Layout(SettingsFrame)] [Authorize(ManagesMailboxes)] [Render(CSR)] [Title("Mailboxes")]
 public component MailboxSettings() {
   List<MailboxView> boxes = [];
   live var failed = ReceivedMail.Where(r => r.Status == ReceivedMailStatus.Failed).OrderBy(r => r.Attempts).ToList();
