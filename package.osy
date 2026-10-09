@@ -10,7 +10,7 @@
 //   (reserved for a later version — see README). Every message carries its Message-ID and its threading headers, because a
 //   reply has to land in the conversation it answers.
 package Osysharp.Mail {
-  version     "0.9.1";
+  version     "0.10.0";
   minPlatform "0.9.0";
   summary     "mail an app sends — one message shape, a pluggable sender, an outbox that delivers after the commit and holds mail when there is no sender; connected mailboxes it sends from (and, with Osysharp.Mail.Receiving, reads); MIME parsing and reply extraction.";
   model "model/*.osy";
