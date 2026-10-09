@@ -15,8 +15,8 @@
     {
       "name": "Osysharp.Identity",
       "kind": "package",
-      "version": "0.7.0",
-      "hash": "sha256:a8f780ee024fb27a6c1f909feb86fec10c8a176788acd8546d1380a9243575bd",
+      "version": "0.8.0",
+      "hash": "sha256:7fadb5f2628cfd6895c44d2e88725b39055ea36c3a8276b3b345c72a931f4358",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/identity",
@@ -25,8 +25,8 @@
     {
       "name": "Osysharp.Mail",
       "kind": "package",
-      "version": "0.9.0",
-      "hash": "sha256:9d881411b8948aae3c06adeb2ebe9cd828d198e07bef0d5c002c83206ca6e013",
+      "version": "0.10.0",
+      "hash": "sha256:8f40fb4add0b7682298672fd1405173722ac1b587c6739933c5ee92736c01cd9",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/mail",
@@ -35,8 +35,8 @@
     {
       "name": "Osysharp.Workflow",
       "kind": "package",
-      "version": "1.0.0",
-      "hash": "sha256:c9b5bb60a8be44efc0030d73b0bd60bdab05926344a68fb4db29dc78ee94c2f8",
+      "version": "1.0.1",
+      "hash": "sha256:9f7ccf1f6dbf22b62e551b015333d41c46431491acd812fb626762531e2a97f8",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Workflow"
@@ -44,8 +44,8 @@
     {
       "name": "Osysharp.Mail.Resend",
       "kind": "package",
-      "version": "0.1.0",
-      "hash": "sha256:dbd1b34b7c8e94a1a6232bb04783f9fa1ce6a3e3caca7e5430c00a37eb655860",
+      "version": "0.1.1",
+      "hash": "sha256:e371cac971d494bb7dbcd93c26d2ce1777ef3cd53d15143951ef008c0194b0bf",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/mail-resend",
@@ -61,5 +61,14 @@
       "source": "workspace:kits/resend",
       "constraint": "0"
     }
-  ]
+  ],
+  "bridges": {
+    "searched": [
+      "workspace",
+      "platform"
+    ],
+    "skipped": [
+      "github: offline \u2014 the public catalog was not searched for bridges. Run \u0060osy lock\u0060 with a network to look."
+    ]
+  }
 }

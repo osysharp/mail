@@ -5,7 +5,7 @@
 //   contract, every app already using Resend with an account model of its own — the shop's `ShopAccount` — would have
 //   been handed a second principal and refused. Resend's own API is untouched; this is the ten lines that adapt it.
 package Osysharp.Mail.Resend {
-  version     "0.1.0";
+  version     "0.1.1";
   minPlatform "0.9.0";
   summary     "Resend as a sender for Osysharp.Mail — threading headers and attachments included.";
   model "model/*.osy";
