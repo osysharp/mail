@@ -22,7 +22,7 @@ using Osysharp.Mail;
 /// SENDING goes through `users/me/messages/send` as the RFC 5322 message the outbox built — its Message-ID, In-Reply-To
 /// and References as they are — so the customer's client threads it, and it sits in the mailbox's Sent folder.
 ///
-/// PUSH (0.2.0, D-PUSHMAIL1): with a `PushTopic` and the `PushServiceAccount` its push subscription signs with, the inbox
+/// PUSH (0.2.0): with a `PushTopic` and the `PushServiceAccount` its push subscription signs with, the inbox
 /// is WATCHED (`users.watch`) — Gmail publishes each change to the Cloud Pub/Sub topic, Pub/Sub pushes it to the app's
 /// push door with a Google-signed OpenID Connect token, and the platform verifies that token before this mailbox reads
 /// the message. A push names the mailbox and nothing else; the fetch it wakes reads the history, as a poll does. The
@@ -38,7 +38,7 @@ public class GmailMailbox : IMailbox {
   public string ClientSecret = "";
   /// The mailbox owner's refresh token, granted once with `gmail.readonly` and `gmail.send` — `Secret.X`, or empty.
   public string RefreshToken = "";
-  /// CONNECT FROM A PAGE (D-PUSHMAIL1): the app's OAuth client (`app.OAuthClients`, `OAuthCapability.Connection`, the
+  /// CONNECT FROM A PAGE: the app's OAuth client (`app.OAuthClients`, `OAuthCapability.Connection`, the
   /// same client id and secret as above) an admin consents with, and the app secret its refresh token is kept in —
   /// the one `RefreshToken` reads (`Security.IsSecretSet("X") ? Secret.X : ""`). Empty: the token is set by hand.
   public string ConnectWith = "";

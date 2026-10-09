@@ -7,9 +7,9 @@
 //   no host but Google's token endpoint and the Gmail API.
 //
 // ⭐ The token exchange sends the client secret and the refresh token in a FORM BODY, which is how Google's token endpoint
-//    takes them — so this package says so, and the app's grant of the host is its acceptance (D-SECRETSINK1).
+//    takes them — so this package says so, and the app's grant of the host is its acceptance.
 package Osysharp.Mail.Gmail {
-  version     "0.2.1";
+  version "0.2.2";
   minPlatform "0.9.0";
   summary     "a Gmail / Google Workspace inbox as a mailbox for Osysharp.Mail — new mail pushed through Cloud Pub/Sub (polled without), replies sent from it, threaded.";
   model "model/*.osy";
