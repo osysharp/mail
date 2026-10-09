@@ -1,4 +1,4 @@
-// The mailboxes page (owner 2026-10-02): the kit announces it to whoever `ManagesMailboxes` (this test app: its agents),
+// The mailboxes page: the kit announces it to whoever `ManagesMailboxes` (this test app: its agents),
 // shows each mailbox and how its mail arrives, starts and stops watching one — and refuses everybody else, on the page's
 // functions as well as in the settings area.
 

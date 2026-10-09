@@ -1,4 +1,4 @@
-// Osysharp.Mail.Receiving — the app WATCHES one or more mailboxes (D-RECEIVE1): it is never a mail server. The mail
+// Osysharp.Mail.Receiving — the app WATCHES one or more mailboxes: it is never a mail server. The mail
 // arrives where it always did — a Google Workspace or Microsoft 365 inbox, any IMAP account. A mailbox that can PUSH tells
 // the app the moment mail lands (and is asked every half hour anyway); one that cannot is polled. Each message is kept
 // once with its whole original and handed to `app.Mail.Receiver` after the commit that kept it.
@@ -14,7 +14,7 @@
 // ⚑ THE MAILBOXES PAGE IS THE KIT'S (0.3.0): Settings → Channels → Mailboxes, announced to the app's settings area, for
 //   whoever `ManagesMailboxes` — the app's own `IsAdmin` unless it says otherwise (`policy ManagesMailboxes => IsLead;`).
 package Osysharp.Mail.Receiving {
-  version     "0.5.0";
+  version "0.5.1";
   minPlatform "0.9.0";
   summary     "watched mailboxes — new mail pushed (Gmail via Pub/Sub, Microsoft 365 via Graph) with a half-hourly safety net, or polled; each message kept once with its original, handed to the app's receiver after the commit, retried, failed with its reason, erasable by sender; and the settings page for whoever manages them.";
   model "model/*.osy";

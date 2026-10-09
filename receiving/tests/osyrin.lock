@@ -6,8 +6,8 @@
     {
       "name": "Osysharp.Identity",
       "kind": "package",
-      "version": "0.8.0",
-      "hash": "sha256:7fadb5f2628cfd6895c44d2e88725b39055ea36c3a8276b3b345c72a931f4358",
+      "version": "0.8.1",
+      "hash": "sha256:83723f5577bbbb2aea58fbee2360a4e00db5c2cfd35f8532ce7be70be153b6fd",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/identity",
@@ -16,8 +16,8 @@
     {
       "name": "Osysharp.Mail",
       "kind": "package",
-      "version": "0.10.0",
-      "hash": "sha256:8f40fb4add0b7682298672fd1405173722ac1b587c6739933c5ee92736c01cd9",
+      "version": "0.10.1",
+      "hash": "sha256:91984e0e4b6a052ade5b492a43569667354454a61f845a7123024ae2d2f27065",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/mail",
@@ -35,8 +35,8 @@
     {
       "name": "Osysharp.Mail.Receiving",
       "kind": "package",
-      "version": "0.5.0",
-      "hash": "sha256:f11d354bf19cedfab0aec6ca5b1c3b9b2c310297eec9319df55cbfc5f963b6dd",
+      "version": "0.5.1",
+      "hash": "sha256:bce72e170781b86b14711db31d52eee127f1c032f2f51f3f7ae5bdcfc89a08a2",
       "minPlatform": "0.9.0",
       "shadow": "app-forkable",
       "source": "workspace:kits/mail-receiving",

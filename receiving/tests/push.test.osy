@@ -1,4 +1,4 @@
-// Osysharp.Mail.Receiving — PUSH FIRST (D-PUSHMAIL1). The fake mailbox can push when a test says so: a watched mailbox
+// Osysharp.Mail.Receiving — PUSH FIRST. The fake mailbox can push when a test says so: a watched mailbox
 // is subscribed through the app's push door, a push WAKES a fetch from the cursor (a burst of them is one fetch), the
 // subscription is renewed before it lapses, a half-hourly poll still catches what no push announced, and a mailbox
 // whose push cannot be set up is polled — never left unwatched. Every push arrives over the app's real route.

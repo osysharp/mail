@@ -1,5 +1,4 @@
-// THE MAILBOXES PAGE — the app's settings area, Channels → Mailboxes (owner 2026-10-02; it was Harbour's own page,
-// D-PUSHMAIL1). For each mailbox in `app.Mail`: whether it is watched, whether its mail is PUSHED or polled and why, when
+// THE MAILBOXES PAGE — the app's settings area, Channels → Mailboxes. For each mailbox in `app.Mail`: whether it is watched, whether its mail is PUSHED or polled and why, when
 // it was last asked and last pushed, and what is wrong if anything is; "Connect" for an inbox connected with the
 // provider's own consent, and start/stop watching. Below it, the mail the app could not take in, each sent through
 // again with one press.
@@ -8,7 +7,7 @@
 //   `IsAdmin` unless the app defines it (`policy ManagesMailboxes => IsLead;`). Connecting an inbox writes the credential
 //   the app reads its customers' mail with, so the page and every function behind it ask it.
 //
-// ⚑ ANNOUNCED, NEVER WIRED (D-SETTINGSREG1): the page lists itself in the settings area through `ISettingsProvider`. An
+// ⚑ ANNOUNCED, NEVER WIRED: the page lists itself in the settings area through `ISettingsProvider`. An
 //   app takes it over by declaring a component of the same name (`MailboxSettings`).
 namespace Osysharp.Mail.Receiving;
 

@@ -4,7 +4,7 @@ using Osysharp.Mail;
 using Osysharp.Storage;
 using Osysharp.Workflow;
 
-// Osysharp.Mail.Receiving (D-RECEIVE1, D-PUSHMAIL1) — the app watches one or more MAILBOXES; it is never a mail server.
+// Osysharp.Mail.Receiving — the app watches one or more MAILBOXES; it is never a mail server.
 //
 //   app.Mail = new MailSetup {
 //     Mailboxes = [new GmailMailbox { Address = "support@acme.com", ClientId = "…", ClientSecret = Secret.GoogleSecret,
@@ -15,7 +15,7 @@ using Osysharp.Workflow;
 //   };
 //   WatchMailbox("support@acme.com");   // once — an admin's "Connect", or the app's setup
 //
-// ⚑ PUSH FIRST, A POLL AS THE SAFETY NET (D-PUSHMAIL1). A mailbox that can push (Gmail through Cloud Pub/Sub, Microsoft
+// ⚑ PUSH FIRST, A POLL AS THE SAFETY NET. A mailbox that can push (Gmail through Cloud Pub/Sub, Microsoft
 //   365 through Graph change notifications) is subscribed when it is watched, and RENEWED before it lapses — by this
 //   kit's own durable workflow, so a restart or a deploy loses nothing. A notification carries no mail: it WAKES the
 //   mailbox's fetch from where the last one stopped, and a burst of them is one fetch. Every half hour the mailbox is
@@ -156,7 +156,7 @@ public void StopWatchingMailbox(MailboxWatch watch) {
 /// it — and asks it anyway on an interval: the safety net while pushes arrive, the only way in while they do not.
 ///
 /// ⚑ EVERY OUTBOUND CALL IS ON A CLOCK, NOT IN `enter` OR IN A PUSH'S ARM — the watch row is written in somebody's
-///   commit (an autostarted run's `enter` is part of it, D-AUTOSTART1), and a push is answered within the provider's
+///   commit (an autostarted run's `enter` is part of it), and a push is answered within the provider's
 ///   few seconds. So a push only moves the run to `Woken`; the fetch, and any renewal it asked for, run on that
 ///   state's clock a moment later.
 public workflow MailboxPolling {
