@@ -2,74 +2,7 @@
   "platform": {
     "version": "0.9.0"
   },
-  "entries": [
-    {
-      "name": "Osysharp.Identity",
-      "kind": "package",
-      "version": "0.8.1",
-      "hash": "sha256:83723f5577bbbb2aea58fbee2360a4e00db5c2cfd35f8532ce7be70be153b6fd",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:kits/identity",
-      "constraint": "0"
-    },
-    {
-      "name": "Osysharp.Mail",
-      "kind": "package",
-      "version": "0.10.1",
-      "hash": "sha256:91984e0e4b6a052ade5b492a43569667354454a61f845a7123024ae2d2f27065",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:kits/mail",
-      "constraint": "0"
-    },
-    {
-      "name": "Osysharp.Workflow",
-      "kind": "package",
-      "version": "1.0.1",
-      "hash": "sha256:9f7ccf1f6dbf22b62e551b015333d41c46431491acd812fb626762531e2a97f8",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Workflow"
-    },
-    {
-      "name": "Osysharp.Mail.Receiving",
-      "kind": "package",
-      "version": "0.5.1",
-      "hash": "sha256:bce72e170781b86b14711db31d52eee127f1c032f2f51f3f7ae5bdcfc89a08a2",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:kits/mail-receiving",
-      "constraint": "0"
-    },
-    {
-      "name": "Osysharp.Storage",
-      "kind": "package",
-      "version": "1.2.1",
-      "hash": "sha256:a344786f4417d7005fb72cb752389bc62ae3e8623fb2cce4b3982fc9b3c7699d",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Storage"
-    },
-    {
-      "name": "Osysharp.Ui",
-      "kind": "package",
-      "version": "2.18.1",
-      "hash": "sha256:5dae9b4103cc649967664228cc945c2d8b5bd9ff8d45e62bf9b67d9db079545e",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Ui"
-    },
-    {
-      "name": "Osysharp.Oauth",
-      "kind": "package",
-      "version": "1.0.1",
-      "hash": "sha256:d98224c50ba53098b1df5c853625d4497a785499c40304f481182b31745e0366",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Oauth"
-    }
-  ],
+  "entries": [],
   "bridges": {
     "searched": [
       "workspace",
