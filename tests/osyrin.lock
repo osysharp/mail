@@ -2,37 +2,7 @@
   "platform": {
     "version": "0.9.0"
   },
-  "entries": [
-    {
-      "name": "Osysharp.Identity",
-      "kind": "package",
-      "version": "0.8.1",
-      "hash": "sha256:83723f5577bbbb2aea58fbee2360a4e00db5c2cfd35f8532ce7be70be153b6fd",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:kits/identity",
-      "constraint": "0"
-    },
-    {
-      "name": "Osysharp.Mail",
-      "kind": "package",
-      "version": "0.10.1",
-      "hash": "sha256:91984e0e4b6a052ade5b492a43569667354454a61f845a7123024ae2d2f27065",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:kits/mail",
-      "constraint": "0"
-    },
-    {
-      "name": "Osysharp.Workflow",
-      "kind": "package",
-      "version": "1.0.1",
-      "hash": "sha256:9f7ccf1f6dbf22b62e551b015333d41c46431491acd812fb626762531e2a97f8",
-      "minPlatform": "0.9.0",
-      "shadow": "app-forkable",
-      "source": "workspace:Platform.Core/Dsl/OsySharp/Baseline/Capabilities/Workflow"
-    }
-  ],
+  "entries": [],
   "bridges": {
     "searched": [
       "workspace",
