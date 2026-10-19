@@ -117,7 +117,8 @@ public class MailboxSettingsSections : ISettingsProvider {
 [Route("/settings/mailboxes")] [Layout(SettingsFrame)] [Authorize(ManagesMailboxes)] [Render(CSR)] [Title("Mailboxes")]
 public component MailboxSettings() {
   List<MailboxView> boxes = [];
-  live var failed = ReceivedMail.Where(r => r.Status == ReceivedMailStatus.Failed).OrderBy(r => r.Attempts).ToList();
+  // The two hundred tried least — a mailbox failing more than that is a mailbox to reconnect, not a list to read.
+  live var failed = ReceivedMail.Where(r => r.Status == ReceivedMailStatus.Failed).OrderBy(r => r.Attempts).Take(200).ToList();
   string problem = "";
   // The provider's consent sends the manager back here, saying how it went in the fragment.
   live var connected = Navigation.Hash.Contains("oauth_connected=");
@@ -155,7 +156,7 @@ public component MailboxSettings() {
       if (connectError != "") { Alert(connectError, title: "The inbox was not connected", tone: Tone.Danger); }
       if (problem != "") { Alert(problem, tone: Tone.Danger); }
       SettingsSection("Inboxes") {
-        Stack(gap: 0, role: UiRole.List, label: "Inboxes") {
+        Stack(gap: 0, role: (boxes.Count == 0) ? UiRole.Group : UiRole.List, label: "Inboxes") {
           if (boxes.Count == 0) { Text("No mailboxes are configured.", color: Colors.TextMuted, fontSize: FontSize.Caption); }
           foreach (var m in boxes) {
             Stack(gap: 1, py: 3, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: m.Address) {
@@ -183,7 +184,7 @@ public component MailboxSettings() {
         Row { Button("Refresh", onPress: Refresh, tone: Tone.Ghost, size: Size.Sm); }
       }
       SettingsSection("Mail the app could not take in", description: "Mail that was kept but could not be handed on — tried again, backing off, for a day. Fix what stopped it, then send it through again.") {
-        Stack(gap: 0, role: UiRole.List, label: "Mail the app could not take in") {
+        Stack(gap: 0, role: (failed.Count == 0) ? UiRole.Group : UiRole.List, label: "Mail the app could not take in") {
           if (failed.Count == 0) { Text("Nothing is waiting.", color: Colors.TextMuted, fontSize: FontSize.Caption); }
           foreach (var f in failed) {
             Row(gap: 3, align: Align.Center, py: 2, borderBW: 1, border: Colors.Border, role: UiRole.ListItem, label: f.Subject) {
