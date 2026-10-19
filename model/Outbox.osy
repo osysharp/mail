@@ -10,6 +10,19 @@ public enum MailStatus {
   [Label("Not sent — no mail sender")] Held,
 }
 
+/// What the carrier said became of a message after it took it — reported later, by the carrier's webhook
+/// (`MailDeliveryReported`). A message nobody reported on has none.
+// ⚠ Appended, never inserted: an enum is stored by position.
+public enum MailDelivery {
+  [Label("Delivered")] Delivered,
+  /// The receiving server refused it — no such mailbox, no such domain, a full inbox.
+  [Label("Bounced")] Bounced,
+  /// The recipient marked it as spam.
+  [Label("Marked as spam")] Complained,
+  /// The carrier would not send it at all, because mail to the address bounced or was marked as spam before.
+  [Label("Suppressed by the carrier")] Suppressed,
+}
+
 /// A message the app sent — written in the caller's commit, delivered after it (`OutgoingMailDelivery`). It is the
 /// delivery record too: when it went, through what, and the carrier's id for it.
 ///
@@ -48,6 +61,11 @@ public entity OutgoingMail {
   /// Why it was held, or why the last attempt failed.
   [MaxLength(500)] string? Problem;
   [ForeignKey(Mail)] OutgoingMailFile[] Files;
+  /// What the carrier reported became of it after it took it (null: nothing reported), when, and in its words — so a
+  /// person waiting for a code can be told that mail to their address bounced instead of waiting for it.
+  MailDelivery? Delivery;
+  DateTime? DeliveryReportedAt;
+  [MaxLength(500)] string? DeliveryDetail;
   /// Forget who it went to and what it said once it is sent (`MailMessage.ForgetOnceSent`).
   bool ForgetOnceSent;
   security {
@@ -227,6 +245,63 @@ public OutgoingMail SendRendered(string to, RenderedEmail mail, string? idempote
   return SendMail(new MailMessage {
     To = [to], Subject = mail.Subject, Text = mail.Text, Html = mail.Html == "" ? null : mail.Html,
   }, idempotencyKey);
+}
+
+// ── what became of it ────────────────────────────────────────────────────────────────────────────────────────────
+
+/// A carrier reported what became of a message it took. Raised by a sender package's webhook once it has PROVEN the
+/// report came from the carrier (Osysharp.Mail.Resend's `ResendDeliveryReported` checks Resend's signature first) —
+/// never from anything a visitor typed, because a forged report would tell a person their mail bounced when it did not.
+[Event("MailDeliveryReported")]
+public sealed class MailDeliveryReported {
+  /// The sender that took it (`IMailSender.Key`) and its id for the message — `OutgoingMail.SentWith` / `ProviderId`.
+  public string SentWith = "";
+  public string ProviderId = "";
+  public MailDelivery Outcome;
+  /// The carrier's words for it ("Permanent General: no such mailbox"), or "".
+  public string Detail = "";
+}
+
+/// Keep a carrier's report on the message it is about. Runs with the app's authority after the commit that raised it,
+/// so a webhook that cannot sign in can still record it. A later "delivered" never hides a failure already reported:
+/// a carrier may report both for one message, and the failure is the fact a person needs.
+[On]
+[SuppressWarning("cost-unbounded-read")]   // the outbox rows the carrier's id names — one
+void RecordMailDelivery(MailDeliveryReported e) {
+  if (e.SentWith == "" || e.ProviderId == "") { return; }
+  foreach (var m in OutgoingMail.Where(m => m.SentWith == e.SentWith && m.ProviderId == e.ProviderId).ToList()) {
+    if (e.Outcome == MailDelivery.Delivered && m.Delivery != null && m.Delivery != MailDelivery.Delivered) { continue; }
+    m.Delivery = e.Outcome;
+    m.DeliveryReportedAt = DateTime.UtcNow;
+    m.DeliveryDetail = e.Detail == "" ? null : (e.Detail.Length > 500 ? e.Detail.Substring(0, 500) : e.Detail);
+  }
+}
+
+/// The newest message to `address` since `since` that the carrier reported it could not deliver (bounced, marked as
+/// spam, suppressed) — or null when there is none, or when a message to it after that one WAS delivered. What a page
+/// asks before telling somebody a code is on its way. Reads the outbox, so it answers only for a caller the app lets read
+/// it (the sign-in flow can).
+[SuppressWarning("cost-unbounded-read")]   // one address's mail over a few days
+public OutgoingMail? UndeliveredTo(string address, DateTime since) {
+  var a = address.Trim().ToLower();
+  if (a == "") { return null; }
+  foreach (var m in OutgoingMail.Where(m => m.To.ToLower().Contains(a) && m.CreatedAt > since)
+                                .OrderByDescending(m => m.CreatedAt).ToList()) {
+    if (!Addresses(m.To).Any(t => IsAddress(t, a))) { continue; }
+    if (m.Delivery == MailDelivery.Delivered) { return null; }
+    if (m.Delivery != null) { return m; }
+  }
+  return null;
+}
+
+/// A sentence for a message the carrier could not deliver — "Mail to ann@x.com bounced: …".
+public string UndeliveredSentence(OutgoingMail m) {
+  var what = m.Delivery == MailDelivery.Bounced ? "bounced"
+    : m.Delivery == MailDelivery.Complained ? "was marked as spam"
+    : m.Delivery == MailDelivery.Suppressed ? "was not sent: the carrier holds back mail to this address after an earlier bounce or spam report"
+    : "was delivered";
+  var detail = m.DeliveryDetail == null || m.Delivery == MailDelivery.Suppressed ? "" : $" ({m.DeliveryDetail})";
+  return $"Mail to {m.To} {what}{detail}.";
 }
 
 /// A reply to a message, in its conversation: `In-Reply-To` is the message answered, `References` its chain plus it.
