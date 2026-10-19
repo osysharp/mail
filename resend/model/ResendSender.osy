@@ -21,6 +21,9 @@ public class ResendSender : IMailSender {
   public string ApiKey = "";
   /// Resend's API root, unless you are pointed at a gateway that speaks the same wire.
   public string BaseUrl = "https://api.resend.com";
+  /// The signing secret of the webhook endpoint you added in Resend's dashboard (`whsec_…`, not the API key) — what
+  /// lets `ResendDeliveryReported` believe a report that mail bounced. Empty: reports are refused, and nothing is kept.
+  public string WebhookSecret = "";
 
   public bool IsReady() { return ApiKey != ""; }
 
@@ -41,4 +44,47 @@ public class ResendSender : IMailSender {
       Subject = message.Subject, Text = message.Text, Html = message.Html, Attachments = files, Headers = headers,
     }, idempotencyKey);
   }
+}
+
+// ── what became of it ────────────────────────────────────────────────────────────────────────────────────────────
+
+/// RESEND'S REPORTS — publish it in `app.Apis` and add its address as a webhook endpoint in Resend's dashboard (events
+/// `email.delivered`, `email.bounced`, `email.complained`, `email.suppressed`); a package opens no routes:
+///
+///   new RestApi("MailEvents") { Route = "mail-events", Auth = new ApiAuth { Anonymous = true },
+///     Endpoints = [ new Endpoint(ResendDeliveryReported) { Method = HttpMethod.Post, Path = "/resend", Raw = true,
+///       Headers = ["svix-id", "svix-timestamp", "svix-signature"] } ] }
+///
+/// Each report is kept on the message it is about (`OutgoingMail.Delivery`), so the app can tell a person that mail to
+/// their address bounced instead of leaving them to wait for a code.
+///
+/// ⛔ THE ENDPOINT IS PUBLIC — Resend cannot sign in — and the signature is the whole authentication: a report is believed
+///    only once it is proven to be Resend's, under `ResendSender.WebhookSecret`.
+[AllowAnonymous]
+public string ResendDeliveryReported() {
+  return TakeResendReport(Request.RawBody ?? "", Request.Header("svix-id") ?? "", Request.Header("svix-timestamp") ?? "",
+                          Request.Header("svix-signature") ?? "");
+}
+
+/// One report from Resend, as it arrived: verified under the app's `ResendSender.WebhookSecret`, then — for a delivery,
+/// a bounce, a spam report or a suppression — raised as `MailDeliveryReported`, which the outbox keeps on the message.
+/// Answers "" (Resend wants only a 2xx). A report that is not proven is refused with the reason, and nothing is kept.
+[AllowAnonymous]
+public string TakeResendReport(string payload, string id, string timestamp, string signature) {
+  var resend = App.Setting<MailSetup>().Sender as ResendSender;
+  if (resend == null || resend.WebhookSecret == "") {
+    throw new ValidationException("This app's mail sender has no Resend webhook secret, so no report from Resend can be "
+      + "believed — set `WebhookSecret` on its `ResendSender` to the endpoint's `whsec_…` secret from Resend's dashboard.");
+  }
+  var e = new ResendWebhook { SigningSecret = resend.WebhookSecret }.Verify(payload, id, timestamp, signature);
+  if (e.EmailId == "") { return ""; }
+  if (e.Type == "email.delivered") { Report(resend, e, MailDelivery.Delivered); }
+  else if (e.Type == "email.bounced") { Report(resend, e, MailDelivery.Bounced); }
+  else if (e.Type == "email.complained") { Report(resend, e, MailDelivery.Complained); }
+  else if (e.Type == "email.suppressed") { Report(resend, e, MailDelivery.Suppressed); }
+  return "";
+}
+
+void Report(ResendSender resend, ResendEvent e, MailDelivery outcome) {
+  Raise(new MailDeliveryReported { SentWith = resend.Key, ProviderId = e.EmailId, Outcome = outcome, Detail = e.Detail });
 }

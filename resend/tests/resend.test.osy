@@ -50,5 +50,43 @@ void a_reply_carries_its_threading_headers_to_resend() {
   }
 }
 
+// ── WHAT BECAME OF IT: Resend's report that a mail bounced is kept on the message, so the app can say so instead of
+//    leaving somebody to wait for a code that will never come. Only a report signed with the app's webhook secret is
+//    believed — anyone can reach the endpoint.
+[Test(Desk)]
+void a_bounce_resend_reports_is_kept_on_the_message_and_a_forged_one_is_not() {
+  runas (Ada) {
+    var mail = Notify("gone@example.test", "Your code");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  // A report signed with another key is refused, and keeps nothing.
+  var forged = SignedReport("not-the-apps-key", "email.bounced", "re-123", "gone@example.test");
+  Assert.Throws<ValidationException>(() => TakeResendReport(forged[0], forged[1], forged[2], forged[3]));
+  UnitOfWork.Commit();
+  Background.Settle();
+  runas (Ada) { Assert.Null(OutgoingMail.Single(m => m.Subject == "Your code").Delivery); }
+
+  // Resend's own report: kept, in Resend's words, and the outbox answers that mail to the address did not arrive.
+  var bounced = SignedReport("the-webhook-signing-key-for-tests", "email.bounced", "re-123", "gone@example.test");
+  TakeResendReport(bounced[0], bounced[1], bounced[2], bounced[3]);
+  UnitOfWork.Commit();
+  Background.Settle();
+  // A "delivered" arriving after it does not hide the bounce.
+  var delivered = SignedReport("the-webhook-signing-key-for-tests", "email.delivered", "re-123", "gone@example.test");
+  TakeResendReport(delivered[0], delivered[1], delivered[2], delivered[3]);
+  UnitOfWork.Commit();
+  Background.Settle();
+  runas (Ada) {
+    var sent = OutgoingMail.Single(m => m.Subject == "Your code");
+    Assert.Equal(MailDelivery.Bounced, sent.Delivery);
+    Assert.NotNull(sent.DeliveryReportedAt);
+    var undelivered = UndeliveredTo("gone@example.test", DateTime.UtcNow - TimeSpan.FromHours(1));
+    Assert.NotNull(undelivered);
+    Assert.Equal("Mail to gone@example.test bounced (Permanent General: mailbox does not exist).", UndeliveredSentence(undelivered!));
+    Assert.Null(UndeliveredTo("someone-else@example.test", DateTime.UtcNow - TimeSpan.FromHours(1)));
+  }
+}
+
 /// `<abc@acme.test>` → `abc@acme.test`.
 string Bare(string messageId) { return messageId.Replace("<", "").Replace(">", ""); }

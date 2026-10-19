@@ -19,7 +19,21 @@ partial entity OutgoingMail { security { allow create, read when IsAgent; } }
 partial entity OutgoingMailFile { security { allow create, read when IsAgent; } }
 
 /// In a real app the key is `Secret.ResendApiKey`; a literal here, because every test stubs the HTTP call.
-app.Mail = new MailSetup { Sender = new ResendSender { ApiKey = "re_test_key" }, From = "Acme <support@acme.test>" };
+app.Mail = new MailSetup {
+  Sender = new ResendSender { ApiKey = "re_test_key", WebhookSecret = "whsec_dGhlLXdlYmhvb2stc2lnbmluZy1rZXktZm9yLXRlc3Rz" },   // "the-webhook-signing-key-for-tests"
+  From = "Acme <support@acme.test>",
+};
+
+/// A report signed the way Resend's webhooks are (Svix: HMAC-SHA256 over `{id}.{timestamp}.{body}`), sent now.
+string[] SignedReport(string signingKey, string type, string emailId, string to) {
+  var body = "{\"type\":\"" + type + "\",\"data\":{\"email_id\":\"" + emailId + "\",\"to\":[\"" + to + "\"],"
+    + (type == "email.bounced" ? "\"bounce\":{\"type\":\"Permanent\",\"subType\":\"General\",\"message\":\"mailbox does not exist\"}" : "\"x\":1")
+    + "}}";
+  var id = "msg_" + Security.RandomId(8);
+  var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+  var sig = Convert.ToBase64String(Crypto.HmacSha256(Text.ToBytes(signingKey), Text.ToBytes(id + "." + ts + "." + body)));
+  return [body, id, ts, "v1," + sig];
+}
 
 OutgoingMail Notify(string to, string subject) {
   return SendMail(new MailMessage { To = [to], Subject = subject, Text = "Hello." });
