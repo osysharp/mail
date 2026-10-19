@@ -228,3 +228,28 @@ void one_sent_mail_is_forgotten_by_its_message_id() {
     Assert.Equal("And this one?", OutgoingMail.Single(m => m.Id == other.Id).Text);
   }
 }
+
+// ── what became of it — a carrier's report lands on the message it names ─────────────────────────────────────────────
+
+[Test(Desk)]
+void a_carriers_report_lands_on_the_message_and_a_later_delivered_never_hides_a_bounce() {
+  runas (Ada) {
+    var mail = Notify("cus@example.test", "Your ticket", "We are on it.");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  Raise(new MailDeliveryReported { SentWith = "recording", ProviderId = "carried-Your ticket",
+                                   Outcome = MailDelivery.Bounced, Detail = "Permanent General: no such mailbox" });
+  UnitOfWork.Commit();
+  Background.Settle();
+  Raise(new MailDeliveryReported { SentWith = "recording", ProviderId = "carried-Your ticket",
+                                   Outcome = MailDelivery.Delivered });
+  UnitOfWork.Commit();
+  Background.Settle();
+  runas (Ada) {
+    var sent = OutgoingMail.Single(m => m.Subject == "Your ticket");
+    Assert.Equal(MailDelivery.Bounced, sent.Delivery);
+    Assert.Equal("Permanent General: no such mailbox", sent.DeliveryDetail);
+    Assert.NotNull(sent.DeliveryReportedAt);
+  }
+}
