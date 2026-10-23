@@ -278,7 +278,7 @@ void KeepPushAlive(MailboxWatch watch) {
     watch.PushRenewedAt = now;
     watch.PushSecret = secret;
     watch.PushProblem = "";
-    Log.Information("Mailbox {Address}: push subscription {Subscription} in force until {Expires}", watch.Address, made.Id, made.ExpiresAt);
+    Log.Debug("Mailbox {Address}: push subscription {Subscription} in force until {Expires}", watch.Address, made.Id, made.ExpiresAt);
   } catch (ExternalServiceException e) {
     watch.PushProblem = Clip($"The provider would not set up push: {e.Message} It is polled until it does.", 500);
     Log.Warning("Mailbox {Address}: push could not be set up — {Problem}", watch.Address, e.Message);
@@ -350,13 +350,13 @@ public string MailboxPushed(string provider) {
       if (notice.Address != "") {
         var found = MailboxPolling.CorrelatePushed(notice.Address.Trim().ToLower());
         if (found != CorrelationOutcome.Deposited) {
-          Log.Information("A push for {Address} woke no watch ({Outcome})", notice.Address, found);
+          Log.Debug("A push for {Address} woke no watch ({Outcome})", notice.Address, found);
         }
       }
       if (notice.Subscription != "") {
         var found = MailboxPolling.CorrelateNotified(notice.Subscription, notice.ClientState, notice.Lifecycle);
         if (found != CorrelationOutcome.Deposited) {
-          Log.Information("A notification for subscription {Subscription} woke no watch ({Outcome})", notice.Subscription, found);
+          Log.Debug("A notification for subscription {Subscription} woke no watch ({Outcome})", notice.Subscription, found);
         }
       }
     }

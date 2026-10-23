@@ -7,7 +7,7 @@ using Osysharp.Mail;
 using Osysharp.Mail.Receiving;
 using MailReceivingKitTests;
 
-[TestFixture]
+[TestFixture, DevSeed("An inbox whose agent manages the mailboxes")]
 void Managed() {
   var ada = new Person { Email = "ada@acme.test", DisplayName = "Ada" };
   new RoleGrant { Member = ada, Role = AppRole.Agent };
