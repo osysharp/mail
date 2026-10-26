@@ -70,3 +70,86 @@ screenshot and its attached script shown on the ticket:
 
 `model/Receiving.osy` is the whole package. `tests/` is its specification — a fake mailbox at the `IMailbox` seam,
 asserting what was KEPT and what the receiver was HANDED.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using MailReceivingKitTests;
+
+[Test(Pushing)]
+void a_watched_mailbox_that_can_push_is_subscribed_through_the_apps_push_door() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    var sub = PushSubscription.Single();
+    Assert.True(sub.NotifyUrl.EndsWith("/api/rest/v1/mail-push/fake"));
+    Assert.Equal(sub.SubscriptionId, Help().PushId);
+    Assert.Equal("", Help().PushProblem);
+  }
+}
+```
+
+From [`tests/push.test.osy`](tests/push.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Storage;
+using MailReceivingKitTests;
+
+[Test(Inbox)]
+void a_mailbox_watched_today_starts_now_and_keeps_what_arrives_after() {
+  runas (Ada) { Arrive(1, Plain("<old@example.test>", "Last week", "Old news.")); UnitOfWork.Commit(); }
+  runas (Ada) { Watch(); }
+  runas (Ada) { Arrive(2, Plain("<new@example.test>", "The export is broken", "It fails on row 3.")); UnitOfWork.Commit(); }
+  runas (Ada) { TestClock.Advance(TimeSpan.FromMinutes(1)); NextPoll(); }
+  runas (Ada) {
+    Assert.False(ReceivedMail.Any(r => r.MessageId == "<old@example.test>"));
+    var kept = ReceivedMail.Single(r => r.MessageId == "<new@example.test>");
+    Assert.Equal("help@acme.test", kept.Mailbox);
+    Assert.Equal("cus@example.test", kept.From);
+    Assert.Equal("The export is broken", kept.Subject);
+    Assert.True(kept.Original != null);
+    Assert.Equal(ReceivedMailStatus.Handled, kept.Status);
+    var handed = Handled.Single(h => h.MessageId == "<new@example.test>");
+    Assert.Equal("Cus Tomer <cus@example.test>", handed.From);
+    Assert.Contains("It fails on row 3.", handed.Text);
+    Assert.Equal(1, MailboxWatch.Single(x => x.Address == "help@acme.test").Received);
+  }
+}
+```
+
+From [`tests/receiving.test.osy`](tests/receiving.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using MailReceivingKitTests;
+
+[Test(Managed)]
+[runas(Manager)]
+void the_kit_announces_the_mailboxes_page_to_whoever_manages_them() {
+  var link = AnnouncedSettings().Single(l => l.To == "/settings/mailboxes");
+  Assert.Equal("Mailboxes", link.Label);
+  Assert.Equal("Channels", link.Group);
+}
+```
+
+From [`tests/settings.test.osy`](tests/settings.test.osy).
+
+## Learn more
+
+- [The Osysharp.Mail.Receiving reference](https://osysharp.com/reference/ui/mail-receiving-kit/)
+- [Osysharp.Mail.Receiving in the package catalogue](https://osysharp.com/packages/#osysharp-mail-receiving)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
