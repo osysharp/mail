@@ -45,3 +45,110 @@ Instead of setting the refresh token by hand, an admin can connect the inbox: de
 `app.OAuthClients` (`OAuthCapability.Connection`, the scopes above), set `ConnectWith` (its name) and `TokenSecret` (the
 app secret its grant is kept in — the one `RefreshToken` reads), and have the page call
 `Security.OAuthConnectUrl(...)` with what `Connection()` answers. See `osy docs config-oauth-connect`.
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Http;
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Mail.Gmail;
+
+[Test(Inbox)]
+void a_new_watch_starts_at_the_inboxs_history_id_and_imports_nothing_older() {
+  runas (Ada) {
+    Arrive("m-old", 999, Mail("<old@example.test>", "Before"));
+    Watch();
+  }
+  runas (Ada) {
+    Assert.Equal("999", MailboxWatch.Single().Cursor);
+    Assert.False(ReceivedMail.Any());
+    // The refresh token went to Google's token endpoint in the form body, nowhere else.
+    var token = WireLog.First(w => w.Url == "https://oauth2.googleapis.com/token");
+    Assert.Contains("grant_type=refresh_token", token.Body);
+    Assert.Contains("refresh_token=refresh-1", token.Body);
+  }
+}
+```
+
+From [`tests/gmail.test.osy`](tests/gmail.test.osy).
+
+```osy
+using Osysharp.Http;
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Mail.Gmail;
+
+[Test(Inbox)]
+void mail_added_to_the_inbox_is_fetched_whole_and_kept_and_sent_mail_is_not() {
+  runas (Ada) { Watch(); }
+  runas (Ada) {
+    Arrive("m-1", 1001, Mail("<one@example.test>", "Broken export"));
+    Arrive("m-2", 1002, Mail("<ours@acme.test>", "Re: Broken export"), "SENT");
+    UnitOfWork.Commit();
+    TestClock.Advance(TimeSpan.FromMinutes(1));
+    Poll();
+  }
+  runas (Ada) {
+    var kept = ReceivedMail.Single();
+    Assert.Equal("m-1", kept.ProviderId);
+    Assert.Equal("<one@example.test>", kept.MessageId);
+    Assert.Equal("Broken export", kept.Subject);
+    Assert.Equal(1, Handled.Count(h => h.MessageId == "<one@example.test>"));
+    Assert.Equal("1002", MailboxWatch.Single().Cursor);
+    Assert.True(WireLog.Any(w => w.Url == "https://gmail.googleapis.com/gmail/v1/users/me/messages/m-1?format=raw"));
+    Assert.False(WireLog.Any(w => w.Url.Contains("/messages/m-2")));
+  }
+}
+```
+
+From [`tests/gmail.test.osy`](tests/gmail.test.osy).
+
+```osy
+using Osysharp.Http;
+using Osysharp.Identity;
+using Osysharp.Mail;
+using Osysharp.Mail.Receiving;
+using Osysharp.Mail.Gmail;
+
+[Test(Inbox)]
+void a_reply_goes_through_the_send_api_as_the_message_the_outbox_built() {
+  runas (Ada) {
+    var reply = SendMail(new MailMessage {
+      From = "Acme Support <support@acme.test>", To = ["cus@example.test"], Subject = "Re: Broken export",
+      Text = "Fixed.", InReplyTo = "<one@example.test>", References = ["<one@example.test>"],
+    });
+    UnitOfWork.Commit();
+    Workflow.Settle(reply);
+  }
+  runas (Ada) {
+    var sent = OutgoingMail.Single();
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.Equal("gmail", sent.SentWith);
+    Assert.Equal("sent-1", sent.ProviderId);
+    var wire = WireLog.Single(w => w.Url == "https://gmail.googleapis.com/gmail/v1/users/me/messages/send");
+    var raw = JsonSerializer.Deserialize<GmailRaw>(wire.Body).Raw;
+    var mail = ParseMail(FromBase64Url(raw));
+    Assert.Equal("<one@example.test>", mail.InReplyTo);
+    Assert.Equal(sent.MessageId, mail.MessageId);
+    Assert.Equal("Acme Support <support@acme.test>", mail.From);
+  }
+}
+```
+
+From [`tests/gmail.test.osy`](tests/gmail.test.osy).
+
+## Learn more
+
+- [The Osysharp.Mail.Gmail reference](https://osysharp.com/reference/ui/mail-receiving-kit/)
+- [Osysharp.Mail.Gmail in the package catalogue](https://osysharp.com/packages/#osysharp-mail-gmail)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
