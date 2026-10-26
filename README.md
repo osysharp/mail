@@ -65,3 +65,88 @@ watches that inbox.
 - **Providers:** [Osysharp.Mail.Gmail](https://osyrin.com/templates/kits/mail-gmail/),
   [Osysharp.Mail.Microsoft365](https://osyrin.com/templates/kits/mail-microsoft365/) and
   [Osysharp.Mail.Imap](https://osyrin.com/templates/kits/mail-imap/).
+
+## Examples
+
+Taken from this package's own tests, which compile and run on every release.
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Mail;
+using MailKitTests;
+
+[Test(Desk)]
+void a_message_goes_after_the_commit_and_is_recorded_as_sent() {
+  runas (Ada) {
+    var mail = Notify("cus@example.test", "Your ticket", "We are on it.");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  runas (Ada) {
+    var sent = OutgoingMail.Single(m => m.Subject == "Your ticket");
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.Equal("recording", sent.SentWith);
+    Assert.Equal("carried-Your ticket", sent.ProviderId);
+    var carried = Carried.Single(c => c.Subject == "Your ticket");
+    Assert.Equal("cus@example.test", carried.To);
+    Assert.Equal(sent.MessageId, carried.MessageId);
+    Assert.True(carried.MessageId.EndsWith("@acme.test>"));
+  }
+}
+```
+
+From [`tests/mail.test.osy`](tests/mail.test.osy).
+
+```osy
+using Osysharp.Mail;
+
+[Test]
+void gmail_html_keeps_the_reply_and_quotes_the_gmail_quote() {
+  var mail = Received(
+    "Thanks, that fixed it!\n\nOn Thu, Oct 1, 2026 at 9:30 AM Acme Support <support@acme.test> wrote:\n\n> Please try restarting the export.",
+    """<div dir="ltr">Thanks, that fixed it!<br></div><br><div class="gmail_quote gmail_quote_container"><div dir="ltr" class="gmail_attr">On Thu, Oct 1, 2026 at 9:30 AM Acme Support &lt;<a href="mailto:support@acme.test">support@acme.test</a>&gt; wrote:<br></div><blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex"><div>Please try restarting the export.</div></blockquote></div>""");
+  var split = SplitReply(mail.Text, mail.Html);
+  Assert.True(split.Sure);
+  Assert.Equal("Thanks, that fixed it!", split.New);
+  Assert.Contains("Please try restarting the export.", split.Quoted);
+  Assert.Contains("wrote:", split.Quoted);
+}
+```
+
+From [`tests/replies.test.osy`](tests/replies.test.osy).
+
+```osy
+using Osysharp.Identity;
+using Osysharp.Mail;
+using MailKitTests;
+
+[Test(Desk)]
+void a_reply_threads_to_the_message_it_answers() {
+  runas (Ada) {
+    var first = Notify("cus@example.test", "Your ticket", "We are on it.");
+    UnitOfWork.Commit();
+    var second = Answer(first, "Fixed now.");
+    UnitOfWork.Commit();
+    Workflow.Settle(second);
+  }
+  runas (Ada) {
+    var first = OutgoingMail.Single(m => m.Subject == "Your ticket");
+    var carried = Carried.Single(c => c.Subject == "Re: Your ticket");
+    Assert.Equal(first.MessageId, carried.InReplyTo);
+    Assert.Equal(first.MessageId, carried.References);
+  }
+}
+```
+
+From [`tests/mail.test.osy`](tests/mail.test.osy).
+
+## Learn more
+
+- [The Osysharp.Mail reference](https://osysharp.com/reference/ui/mail-kit/)
+- [Osysharp.Mail in the package catalogue](https://osysharp.com/packages/#osysharp-mail)
+- [The Osy# reference](https://osysharp.com/reference/) — the language, the runtime and every kit
+- [`llms-full.txt`](https://osysharp.com/llms-full.txt) — the whole reference and specification as one Markdown file, for a coding agent
+
+## Licence
+
+MIT — see [`LICENSE`](LICENSE).
