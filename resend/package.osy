@@ -5,12 +5,14 @@
 //   contract, every app already using Resend with an account model of its own — the shop's `ShopAccount` — would have
 //   been handed a second principal and refused. Resend's own API is untouched; this is the ten lines that adapt it.
 package Osysharp.Mail.Resend {
-  version     "0.2.0";
-  minPlatform "0.14.0";
+  version     "0.2.1";
+  minPlatform "0.19.0";
   summary     "Resend as a sender for Osysharp.Mail — threading headers and attachments included.";
   model "model/*.osy";
   use Osysharp.Mail@0;
-  use Osysharp.Resend@0 { egress "api.resend.com"; }
+  // Osysharp.Resend reaches api.resend.com. A package cannot grant that; the APP that uses this kit grants it, beside
+  // this kit's own: `use Osysharp.Resend@0 { egress "api.resend.com"; }`.
+  use Osysharp.Resend@0;
   use Osysharp.Http;
   egress "api.resend.com";
   tests "tests";
