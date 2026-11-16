@@ -30,6 +30,7 @@ public enum MailDelivery {
 ///   which mails reset links and verifications — and an app grants its own people:
 ///     `partial entity OutgoingMail { security { allow create, read when IsAgent; } }`
 ///   Nothing else can put a row here, so nobody can use the app to send mail in its name to anybody they like.
+///   A kit whose run mails what its starter may not (an invitation) names its own actor in `SendsAppMail`.
 [Authority(Extensible)]
 public entity OutgoingMail {
   [CreatedAt] DateTime? CreatedAt;
@@ -75,9 +76,14 @@ public entity OutgoingMail {
     // which is the one thing mailing it exists to prove. Guarded by tests/mail.test.osy
     // (a_recipient_cannot_read_their_mail_out_of_the_outbox).
     allow read when IsAuthenticator;
-    allow create when IsAuthenticator;
+    allow create when IsAuthenticator || SendsAppMail;
   }
 }
+
+/// Who puts the app's mail in the outbox besides the sign-in flow: nobody, until the app says so — or a kit that uses
+/// this one, for its own actor alone (`policy SendsAppMail += user == Actor.Of<InvitationRun>();`). It lets a message be
+/// WRITTEN, and nothing more: the outbox is still read by the sign-in flow alone (and whoever the app grants it).
+[Extensible] virtual policy SendsAppMail => false;
 
 /// A file a message carries.
 [Authority(Extensible)]
@@ -89,7 +95,7 @@ public entity OutgoingMailFile {
   [Required] byte[] Content;
   security {
     allow read when IsAuthenticator;
-    allow create when IsAuthenticator;
+    allow create when IsAuthenticator || SendsAppMail;
   }
 }
 
