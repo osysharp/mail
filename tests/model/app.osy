@@ -37,7 +37,7 @@ entity Carried {
 entity SenderState {
   bool Unconfigured = false;
   bool Down = false;
-  security { allow read, create when IsAuthenticated || IsAuthenticator; }
+  security { allow read, create, update when IsAuthenticated || IsAuthenticator; }
 }
 
 /// A sender that records instead of sending.

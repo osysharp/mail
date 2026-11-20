@@ -61,6 +61,9 @@ public entity OutgoingMail {
   [MaxLength(120)] string? ProviderId;
   /// Why it was held, or why the last attempt failed.
   [MaxLength(500)] string? Problem;
+  /// How many times the carrier refused it (a throw from the sender). Each refusal waits longer before the next try —
+  /// a minute, doubling, at most an hour — and the mail stays Queued until one is taken (`OutgoingMailDelivery`).
+  int Attempts = 0;
   [ForeignKey(Mail)] OutgoingMailFile[] Files;
   /// What the carrier reported became of it after it took it (null: nothing reported), when, and in its words — so a
   /// person waiting for a code can be told that mail to their address bounced instead of waiting for it.
@@ -103,8 +106,15 @@ public entity OutgoingMailFile {
 ///
 /// ⚑ THE SEND IS A CLOCK DUE AT ONCE, NOT THE `enter`. A message is written inside somebody's commit, and an autostarted
 ///   run's `enter` is part of that commit — it would wait on the carrier. So `enter` decides only what it can decide at
-///   once (is there a sender at all), and the send runs when the clock fires, after the commit. A throw there leaves the
-///   message Queued and the delivery is retried — what a carrier that is briefly down should get.
+///   once (is there a sender at all), and the send runs when the clock fires, after the commit.
+///
+/// ⛔ A REFUSED SEND IS CAUGHT AND TRIED AGAIN ON A CLOCK OF ITS OWN, never left to throw out of the route (0.13.0). A
+///   route that throws is redelivered as the SAME execution, and the sender's outbound call is a durable step of it: the
+///   redelivery replayed the carrier's recorded 503 instead of asking again, so a mail the carrier refused once was
+///   refused for ever, and nothing scheduled the redelivery either. Now the refusal is kept on the row (`Problem`,
+///   `Attempts`) and the run re-enters `Queued`, whose clock waits `RetryWaitOf` — each try a new execution that asks the
+///   carrier again. The message id and the idempotency key stay the same, so a carrier that took a try it answered badly
+///   sends once.
 public workflow OutgoingMailDelivery {
   Tracks    = OutgoingMail.Status;
   Autostart = true;
@@ -131,18 +141,24 @@ public workflow OutgoingMailDelivery {
         }
       }
     }
-    Expire { Within = TimeSpan.Zero; Accrues = false; }
+    Expire { Within = RetryWaitOf(this.Item); Accrues = false; }
     on Expire {
       var setup = App.Setting<MailSetup>();
       var key = "mail-" + this.Item.Id.ToString();
       var mailbox = MailboxAt(AddressPart(this.Item.From ?? setup.From));
-      if (mailbox != null) {
-        this.Item.ProviderId = mailbox.SendMail(MessageOf(this.Item, setup), key);
-        this.Item.SentWith = mailbox.Key;
-      } else {
-        var sender = setup.Sender!;
-        this.Item.ProviderId = sender.SendMail(MessageOf(this.Item, setup), key);
-        this.Item.SentWith = sender.Key;
+      try {
+        if (mailbox != null) {
+          this.Item.ProviderId = mailbox.SendMail(MessageOf(this.Item, setup), key);
+          this.Item.SentWith = mailbox.Key;
+        } else {
+          var sender = setup.Sender!;
+          this.Item.ProviderId = sender.SendMail(MessageOf(this.Item, setup), key);
+          this.Item.SentWith = sender.Key;
+        }
+      } catch (Exception e) {
+        this.Item.Attempts = this.Item.Attempts + 1;
+        this.Item.Problem = e.Message.Length > 500 ? e.Message.Substring(0, 500) : e.Message;
+        goto Queued;
       }
       this.Item.SentAt = DateTime.UtcNow;
       this.Item.Problem = null;
@@ -153,6 +169,15 @@ public workflow OutgoingMailDelivery {
 
   terminal success Sent { }
   terminal cancel Held { }
+}
+
+/// How long a queued message waits before its next try: at once the first time, then a minute after the carrier's
+/// first refusal, doubling with each one, and never more than an hour.
+TimeSpan RetryWaitOf(OutgoingMail m) {
+  if (m.Attempts <= 0) { return TimeSpan.Zero; }
+  var minutes = 1;
+  for (var i = 1; i < m.Attempts && minutes < 60; i++) { minutes = minutes + minutes; }
+  return TimeSpan.FromMinutes(minutes < 60 ? minutes : 60);
 }
 
 // ── sending ──────────────────────────────────────────────────────────────────────────────────────────────────────

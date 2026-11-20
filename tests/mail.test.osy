@@ -101,6 +101,39 @@ void a_carrier_that_is_down_leaves_the_mail_waiting_to_be_retried() {
   runas (Ada) { Assert.Equal(MailStatus.Queued, OutgoingMail.Single(m => m.Subject == "Retry me").Status); }
 }
 
+/// A refusal is kept on the row and tried again after a wait — not at once, and not never — and the mail goes once.
+[Test(Desk)]
+void a_refused_mail_says_why_waits_and_goes_once_the_carrier_is_back() {
+  runas (Ada) { new SenderState { Down = true }; }
+  runas (Ada) {
+    var mail = Notify("cus@example.test", "Retry me", "…");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  runas (Ada) {
+    var waiting = OutgoingMail.Single(m => m.Subject == "Retry me");
+    Assert.Equal(MailStatus.Queued, waiting.Status);
+    Assert.Equal("The carrier is down.", waiting.Problem);
+    Assert.Equal(1, waiting.Attempts);
+  }
+  // Still down a minute on: the second try is refused too, and the third waits twice as long.
+  TestClock.Advance(TimeSpan.FromSeconds(61));
+  Background.Settle();
+  runas (Ada) { Assert.Equal(2, OutgoingMail.Single(m => m.Subject == "Retry me").Attempts); }
+  runas (Ada) { SenderState.Single(s => s.Down).Down = false; UnitOfWork.Commit(); }
+  TestClock.Advance(TimeSpan.FromSeconds(61));
+  Background.Settle();
+  runas (Ada) { Assert.False(Carried.Any(c => c.Subject == "Retry me")); }
+  TestClock.Advance(TimeSpan.FromSeconds(61));
+  Background.Settle();
+  runas (Ada) {
+    var sent = OutgoingMail.Single(m => m.Subject == "Retry me");
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.Null(sent.Problem);
+    Assert.Equal(1, Carried.Count(c => c.Subject == "Retry me"));
+  }
+}
+
 [Test(Desk)]
 void a_message_with_no_body_is_refused_where_it_was_written() {
   runas (Ada) { Assert.Throws(() => NoBody("cus@example.test")); }

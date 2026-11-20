@@ -190,7 +190,9 @@ public class MailboxItem {
 /// work of its own; a throw undoes what this did and it is tried again a few minutes later, for a day.
 /// `Osysharp.Conversations.Mail` ships one that files each mail into its conversation.
 public interface IMailReceiver {
-  void Received(MailMessage mail, MailReceipt receipt);
+  /// An ENTRY of outside input: a raise the receiver makes for the mail, with no person behind it, is asked at a door as
+  /// the mail hand-off, which passes it; what that raise drives is asked as nobody known.
+  [Entry(Outside)] void Received(MailMessage mail, MailReceipt receipt);
 }
 
 /// Where a received mail came from, as plain data — the mailbox, the provider's id, and the kept original (the
