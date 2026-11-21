@@ -91,6 +91,43 @@ void a_reply_carries_its_threading_headers_to_resend() {
 
 From [`tests/resend.test.osy`](tests/resend.test.osy).
 
+```osy
+using Osysharp.Http;
+using Osysharp.Identity;
+using Osysharp.Mail;
+
+[Test(Desk)]
+void a_mail_resend_refused_goes_once_resend_is_back() {
+  List<string> refused = [];
+  List<string> taken = [];
+  Http.Post.Stub((url, body) => { refused.Add(body); return new HttpResponse { StatusCode = 503, Body = "{\"message\":\"down\"}" }; });
+  runas (Ada) {
+    var mail = Notify("cus@example.test", "Retry me");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  runas (Ada) {
+    var waiting = OutgoingMail.Single(m => m.Subject == "Retry me");
+    Assert.Equal(MailStatus.Queued, waiting.Status);
+    Assert.Equal("Resend send answered 503: down", waiting.Problem);
+  }
+  Assert.Equal(1, refused.Count);
+  Http.Post.Stub((url, body) => { taken.Add(body); return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"re-456\"}" }; });
+  TestClock.Advance(TimeSpan.FromMinutes(2));
+  Background.Settle();
+  TestClock.Advance(TimeSpan.FromHours(1));
+  Background.Settle();
+  runas (Ada) {
+    var sent = OutgoingMail.Single(m => m.Subject == "Retry me");
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.Equal("re-456", sent.ProviderId);
+  }
+  Assert.Equal(1, taken.Count);
+}
+```
+
+From [`tests/resend.test.osy`](tests/resend.test.osy).
+
 ## Learn more
 
 - [The Osysharp.Mail.Resend reference](https://osysharp.com/reference/ui/mail-kit/)

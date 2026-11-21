@@ -90,3 +90,35 @@ void a_bounce_resend_reports_is_kept_on_the_message_and_a_forged_one_is_not() {
 
 /// `<abc@acme.test>` → `abc@acme.test`.
 string Bare(string messageId) { return messageId.Replace("<", "").Replace(">", ""); }
+
+/// Resend refuses the first try (a 503), then is back: the mail waits Queued with Resend's words, and the next try asks
+/// Resend AGAIN — it is not handed the recorded 503 — and the message goes exactly once. The Mail kit's retry (0.13.0),
+/// through a real carrier's outbound call.
+[Test(Desk)]
+void a_mail_resend_refused_goes_once_resend_is_back() {
+  List<string> refused = [];
+  List<string> taken = [];
+  Http.Post.Stub((url, body) => { refused.Add(body); return new HttpResponse { StatusCode = 503, Body = "{\"message\":\"down\"}" }; });
+  runas (Ada) {
+    var mail = Notify("cus@example.test", "Retry me");
+    UnitOfWork.Commit();
+    Workflow.Settle(mail);
+  }
+  runas (Ada) {
+    var waiting = OutgoingMail.Single(m => m.Subject == "Retry me");
+    Assert.Equal(MailStatus.Queued, waiting.Status);
+    Assert.Equal("Resend send answered 503: down", waiting.Problem);
+  }
+  Assert.Equal(1, refused.Count);
+  Http.Post.Stub((url, body) => { taken.Add(body); return new HttpResponse { StatusCode = 200, Body = "{\"id\":\"re-456\"}" }; });
+  TestClock.Advance(TimeSpan.FromMinutes(2));
+  Background.Settle();
+  TestClock.Advance(TimeSpan.FromHours(1));
+  Background.Settle();
+  runas (Ada) {
+    var sent = OutgoingMail.Single(m => m.Subject == "Retry me");
+    Assert.Equal(MailStatus.Sent, sent.Status);
+    Assert.Equal("re-456", sent.ProviderId);
+  }
+  Assert.Equal(1, taken.Count);
+}
